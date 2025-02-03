@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "rttt"
+version = "1.0.0"
+description = "HARDWARIO Real Time Transfer Terminal Console"
+authors = ["Karel Blavka <karel.blavka@hardwario.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/hardwario/py-rttt"
+repository = "https://github.com/hardwario/py-rttt"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Utilities",
+    "Environment :: Console"
+]
+
+packages = [
+    { include = "rttt" },
+]
+
+[tool.poetry.scripts]
+rttt = "rttt.cli:main"
+
+[tool.poetry.dependencies]
+python = ">=3.8, <4"
+
+[tool.poetry.dev-dependencies]
+pycodestyle = "^2.12.1"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
