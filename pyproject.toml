@@ -36,6 +36,7 @@ click = "^8.1.8"
 loguru = "^0.7.3"
 prompt-toolkit = "^3.0.48"
 pyperclip = "^1.9.0"
+pylink-square = "^1.4.0"
 
 [tool.poetry.dev-dependencies]
 pycodestyle = "^2.12.1"
