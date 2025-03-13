@@ -20,7 +20,9 @@ class FileLogConnector(Connector):
         self.connector = connector
         self.connector.on(self._on)
         logger.info(f'file_path: {file_path}')
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        d = os.path.dirname(file_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
         self.fd = open(file_path, 'a')
 
     def open(self):

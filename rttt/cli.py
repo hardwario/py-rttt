@@ -32,6 +32,16 @@ def cli(serial, device, speed, reset, terminal_buffer, logger_buffer, latency, h
     jlink.open(serial_no=serial)
     jlink.set_speed(speed)
     jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+
+    logger.info(f'J-Link dll version: {jlink.version}')
+    logger.info(f'J-Link dll compile_date: {jlink.compile_date}')
+    try:
+        logger.info(f'J-Link dll path: {jlink._library._path}')
+    except Exception as _:
+        pass
+    logger.info(f'J-Link firmware_version: {jlink.firmware_version}')
+    logger.info(f'J-Link serial_number: {jlink.serial_number}')
+
     jlink.connect(device)
 
     if reset:

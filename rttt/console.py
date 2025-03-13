@@ -23,7 +23,9 @@ class Console:
         self.exception = None
 
         if history_file:
-            os.makedirs(os.path.dirname(history_file), exist_ok=True)
+            d = os.path.dirname(history_file)
+            if d:
+                os.makedirs(d, exist_ok=True)
 
         root_container, input_field, terminal_window, logger_window = create_layout(self.state, history_file)
         self.input_field = input_field
