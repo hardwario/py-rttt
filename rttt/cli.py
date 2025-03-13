@@ -2,6 +2,7 @@ import os
 import sys
 import click
 import time
+import yaml
 import pylink
 from loguru import logger
 from rttt import __version__ as version
@@ -16,8 +17,8 @@ DEFAULT_JLINK_SPEED_KHZ = 2000
 
 @click.command('rttt')
 @click.version_option(version, prog_name='rttt')
-@click.option('--serial', type=int, metavar='SERIAL_NUMBER', help='J-Link serial number')
-@click.option('--device', type=str, metavar='DEVICE', help='J-Link Device name', required=True, prompt=True)
+@click.option('--serial', type=int, metavar='SERIAL_NUMBER', help='J-Link serial number', show_default=True)
+@click.option('--device', type=str, metavar='DEVICE', help='J-Link Device name', required=True, prompt=True, show_default=True)
 @click.option('--speed', type=int, metavar="SPEED", help='J-Link clock speed in kHz', default=DEFAULT_JLINK_SPEED_KHZ, show_default=True)
 @click.option('--reset', is_flag=True, help='Reset application firmware.')
 @click.option('--terminal-buffer', type=int, help='RTT Terminal buffer index.', show_default=True, default=0)
@@ -77,7 +78,12 @@ def main():
 
     try:
         with logger.catch(reraise=True, exclude=KeyboardInterrupt):
-            cli(auto_envvar_prefix='RTTT')
+            default_map = {}
+            if os.path.exists('.rttt.yml'):
+                with open('.rttt.yml', 'r') as f:
+                    default_map = yaml.safe_load(f)
+                    logger.debug('Loaded config: {}', default_map)
+            cli(auto_envvar_prefix='RTTT', default_map=default_map)
     except KeyboardInterrupt:
         pass
     except Exception as e:
