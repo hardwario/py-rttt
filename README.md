@@ -1,6 +1,6 @@
 # HARDWARIO Real Time Transfer Terminal Console
 
-[![Main](https://github.com/hardwario/py-rttt/actions/workflows/main.yaml/badge.svg)](https://github.com/hardwario/py-rttt/actions/workflows/main.yaml)
+[![Main](https://github.com/hardwario/py-rttt/actions/workflows/main.yaml/badge.svg)](https://github.com/hardwario/py-rttt/actions/workflows/publish.yaml)
 [![Release](https://img.shields.io/github/release/hardwario/py-rttt.svg)](https://github.com/hardwario/py-rttt/releases)
 [![PyPI](https://img.shields.io/pypi/v/rttt.svg)](https://pypi.org/project/rttt/)
 [![License](https://img.shields.io/github/license/hardwario/py-rttt.svg)](https://github.com/hardwario/py-rttt/blob/master/LICENSE)
@@ -22,7 +22,7 @@ This package is particularly useful for **debugging, logging, and real-time data
 - **Support for multiple RTT buffers** (console and logger).
 - **Adjustable latency** for optimized readout.
 - **J-Link support** with configurable serial numbers, device types, and speeds.
-- **Command-line interface (CLI)** for quick access to features.
+- **Command-line interface (CLI)** for quick and easy access.
 - **Easy installation via PyPI**.
 
 ## Installation
@@ -30,7 +30,7 @@ This package is particularly useful for **debugging, logging, and real-time data
 To install the package, use:
 
 ```bash
-pip install hardwario
+pip install rttt
 ```
 
 To verify the installation, run:
@@ -72,7 +72,7 @@ Options:
 
 ## Examples
 
-Connect to a device (replace nRF52840 with your actual device name):
+Connect to a device (replace NRF52840_xxAA with your actual device name):
 
 ```bash
 rttt --device NRF52840_xxAA
@@ -84,6 +84,19 @@ Use a specific J-Link serial number:
 rttt --device NRF52840_xxAA --serial 123456789
 ```
 
+## Configuration File
+You can create a .rttt.yml configuration file in the working directory to load default values automatically.
+
+Example configuration:
+```
+device: NRF9151_XXCA
+console_file: "test.log"
+```
+
+With this configuration, simply running:
+```bash
+rttt
+```
 
 ## License
 
