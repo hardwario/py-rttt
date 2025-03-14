@@ -26,10 +26,10 @@ class FileLogConnector(Connector):
         self.fd = open(file_path, 'a')
 
     def open(self):
-        self.fd.write(f'{ "*" * 80 }\n')
+        self.fd.write(f'{"*" * 80}\n')
         center_text = f'{self.open_text:^74}'
         self.fd.write(f'***{center_text}***\n')
-        self.fd.write(f'{ "*" * 80 }\n')
+        self.fd.write(f'{"*" * 80}\n')
         self.fd.flush()
         self.connector.open()
 
