@@ -93,6 +93,7 @@ RTTT supports configuration via a `.rttt.yaml` file, which can be placed in the 
 ```yaml
 device: NRF9151_XXCA
 console_file: "test.log"
+```
 
 With this configuration, simply running:
 ```bash
