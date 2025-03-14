@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "rttt"
-version = "1.1.0"
+version = "1.2.0"
 description = "HARDWARIO Real Time Transfer Terminal Console"
 authors = ["Karel Blavka <karel.blavka@hardwario.com>"]
 license = "MIT"
