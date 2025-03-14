@@ -24,7 +24,7 @@ OLD_LOG_PATERN = r'^(#.*?\d(?:\.\d+)? <(\w)\>)(.*)'
 
 
 class LogLexer(Lexer):
-    def __init__(self, colors: dict | None = DEF_LOG_LEXER_COLOR_TABLE) -> None:
+    def __init__(self, colors: dict = DEF_LOG_LEXER_COLOR_TABLE) -> None:
         super().__init__()
         self.re = re.compile(LOG_PATERN)
         self.re_old = re.compile(OLD_LOG_PATERN)

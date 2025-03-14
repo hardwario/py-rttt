@@ -53,7 +53,7 @@ jobs:
 
       - name: Install Poetry
         run: |
-          curl -sSL https://install.python-poetry.org | python - -y
+          curl -sSL https://install.python-poetry.org | sed 's/symlinks=False/symlinks=True/' | python3 -
 
       - name: Update PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
