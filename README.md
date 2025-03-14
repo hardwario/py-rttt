@@ -1,6 +1,6 @@
 # HARDWARIO Real Time Transfer Terminal Console
 
-[![Main](https://github.com/hardwario/py-rttt/actions/workflows/main.yaml/badge.svg)](https://github.com/hardwario/py-rttt/actions/workflows/publish.yaml)
+[![Main](https://github.com/hardwario/py-rttt/actions/workflows/publish.yaml/badge.svg)](https://github.com/hardwario/py-rttt/actions/workflows/publish.yaml)
 [![Release](https://img.shields.io/github/release/hardwario/py-rttt.svg)](https://github.com/hardwario/py-rttt/releases)
 [![PyPI](https://img.shields.io/pypi/v/rttt.svg)](https://pypi.org/project/rttt/)
 [![License](https://img.shields.io/github/license/hardwario/py-rttt.svg)](https://github.com/hardwario/py-rttt/blob/master/LICENSE)
@@ -12,8 +12,8 @@
 
 This package is particularly useful for **debugging, logging, and real-time data visualization** in embedded applications.
 
-<a href="image.png" target="_blank">
-    <img src="image.png" alt="alt text" height="200">
+<a href="https://github.com/hardwario/py-rttt/raw/main/image.png" target="_blank">
+    <img src="https://github.com/hardwario/py-rttt/raw/main/image.png" alt="alt text" height="200">
 </a>
 
 ## Features
@@ -85,13 +85,14 @@ rttt --device NRF52840_xxAA --serial 123456789
 ```
 
 ## Configuration File
-You can create a .rttt.yml configuration file in the working directory to load default values automatically.
 
-Example configuration:
-```
+RTTT supports configuration via a `.rttt.yaml` file, which can be placed in the **working directory**, the **home directory (`~/.rttt.yaml`)**, or the **user configuration directory (`~/.config/rttt.yaml`)**. The file is loaded from the first available location in this order—**working directory first, then home, then config**. If no configuration file is found, default settings are used.
+
+### Example Configuration:
+
+```yaml
 device: NRF9151_XXCA
 console_file: "test.log"
-```
 
 With this configuration, simply running:
 ```bash

@@ -15,6 +15,15 @@ DEFAULT_CONSOLE_FILE = os.path.expanduser(f"~/.rttt_console")
 DEFAULT_JLINK_SPEED_KHZ = 2000
 
 
+def get_default_map():
+    for cf in ['.rttt.yaml', os.path.expanduser('~/.rttt.yaml'), os.path.expanduser('~/.config/rttt.yaml')]:
+        if os.path.exists(cf):
+            logger.debug('Loading config from: {}', cf)
+            with open(cf, 'r') as f:
+                return yaml.safe_load(f)
+    return {}
+
+
 @click.command('rttt')
 @click.version_option(version, prog_name='rttt')
 @click.option('--serial', type=int, metavar='SERIAL_NUMBER', help='J-Link serial number', show_default=True)
@@ -78,11 +87,8 @@ def main():
 
     try:
         with logger.catch(reraise=True, exclude=KeyboardInterrupt):
-            default_map = {}
-            if os.path.exists('.rttt.yml'):
-                with open('.rttt.yml', 'r') as f:
-                    default_map = yaml.safe_load(f)
-                    logger.debug('Loaded config: {}', default_map)
+            default_map = get_default_map()
+            logger.debug('Loaded config: {}', default_map)
             cli(auto_envvar_prefix='RTTT', default_map=default_map)
     except KeyboardInterrupt:
         pass
