@@ -1,0 +1,71 @@
+name: Test
+
+on:
+  push:
+    paths-ignore:
+      - '**/README.md'
+      - '.*'
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  codestyle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install code style checker
+        run: pip install pycodestyle
+
+      - name: Check code style
+        run: pycodestyle --ignore=E501 rttt
+
+  test_build:
+    needs: codestyle
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - '3.8'
+          - '3.9'
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: "Set up Python ${{ matrix.python-version }}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python - -y
+
+      - name: Update PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Update Poetry configuration
+        run: poetry config virtualenvs.create false
+
+      - name: Install dependencies
+        run: poetry sync --no-interaction
+
+      - name: Test run
+        run: poetry run rttt --version
+
+      - name: Package project
+        run: poetry build
