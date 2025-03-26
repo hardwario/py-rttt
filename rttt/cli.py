@@ -24,18 +24,29 @@ def get_default_map():
     return {}
 
 
+class IntOrHexParamType(click.ParamType):
+    name = 'number'
+
+    def convert(self, value, param, ctx):
+        try:
+            return int(value, 0)
+        except ValueError:
+            self.fail(f'{value} is not a valid integer or hex value', param, ctx)
+
+
 @click.command('rttt')
 @click.version_option(version, prog_name='rttt')
 @click.option('--serial', type=int, metavar='SERIAL_NUMBER', help='J-Link serial number', show_default=True)
 @click.option('--device', type=str, metavar='DEVICE', help='J-Link Device name', required=True, prompt=True, show_default=True)
 @click.option('--speed', type=int, metavar="SPEED", help='J-Link clock speed in kHz', default=DEFAULT_JLINK_SPEED_KHZ, show_default=True)
 @click.option('--reset', is_flag=True, help='Reset application firmware.')
+@click.option('--address', metavar="ADDRESS", type=IntOrHexParamType(), help='RTT block address.')
 @click.option('--terminal-buffer', type=int, help='RTT Terminal buffer index.', show_default=True, default=0)
 @click.option('--logger-buffer', type=int, help='RTT Logger buffer index.', show_default=True, default=1)
 @click.option('--latency', type=int, help='Latency for RTT readout in ms.', show_default=True, default=50)
 @click.option('--history-file', type=click.Path(writable=True), show_default=True, default=DEFAULT_HISTORY_FILE)
 @click.option('--console-file', type=click.Path(writable=True), show_default=True, default=DEFAULT_CONSOLE_FILE)
-def cli(serial, device, speed, reset, terminal_buffer, logger_buffer, latency, history_file, console_file):
+def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     jlink = pylink.JLink()
@@ -59,9 +70,8 @@ def cli(serial, device, speed, reset, terminal_buffer, logger_buffer, latency, h
         jlink.go()
         time.sleep(1)
 
-    connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency)
+    connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address)
 
-    # connector = DemoConnector()
     if console_file:
         text = f'Device: {device} J-Link sn: {serial}' if serial else f'Device: {device}'
         connector = FileLogConnector(connector, console_file, text=text)
