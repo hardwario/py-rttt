@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "rttt"
-version = "1.3.0"
+version = "1.3.1"
 description = "HARDWARIO Real Time Transfer Terminal Console"
 authors = ["Karel Blavka <karel.blavka@hardwario.com>"]
 license = "MIT"
@@ -36,7 +36,7 @@ click = "^8.1.8"
 loguru = "^0.7.3"
 prompt-toolkit = "^3.0.50"
 pyperclip = "^1.9.0"
-pylink-square = "^1.5.0"
+pylink-square = "^1.6.0"
 psutil = "^7.0.0"
 pyyaml = "^6.0.2"
 
