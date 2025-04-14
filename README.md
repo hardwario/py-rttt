@@ -61,6 +61,7 @@ Options:
   --device DEVICE            J-Link Device name. [required]
   --speed SPEED              J-Link clock speed in kHz. [default: 2000]
   --reset                    Reset application firmware.
+  --address ADDRESS          RTT block address.
   --terminal-buffer INTEGER  RTT Terminal buffer index. [default: 0]
   --logger-buffer INTEGER    RTT Logger buffer index. [default: 1]
   --latency INTEGER          Latency for RTT readout in ms. [default: 50]
