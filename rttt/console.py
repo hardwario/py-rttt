@@ -97,12 +97,7 @@ class Console:
             }, priority=Priority.MOST_PRECISE)
         )
 
-        self.evets = asyncio.Queue()
-
         self.state.set_app(self.app)
-
-    def _connector_handle_event(self, event: Event):
-        self.evets.put_nowait(event)
 
     def run(self):
         async def event_task():
@@ -118,12 +113,22 @@ class Console:
                         self._buffer_insert_text(self.terminal_buffer, f'{event.data}\n')
 
         def pre_run():
-            self.app.create_background_task(event_task())
+            self.evets = asyncio.Queue()
 
-        self.connector.on(self._connector_handle_event)
-        self.connector.open()
-        self.app.run(pre_run=pre_run)
-        self.connector.close()
+            def connector_handle_event(event: Event):
+                try:
+                    self.evets.put_nowait(event)
+                except Exception as e:
+                    logger.exception(f"Failed to queue event: {event}")
+
+            self.connector.on(connector_handle_event)
+            self.app.create_background_task(event_task())
+            self.connector.open()
+
+        try:
+            self.app.run(pre_run=pre_run)
+        finally:
+            self.connector.close()
 
     def exit(self, exception=None):
         self.exception = exception
