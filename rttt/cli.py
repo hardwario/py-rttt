@@ -60,8 +60,10 @@ def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, l
         logger.info(f'J-Link dll path: {jlink._library._path}')
     except Exception as _:
         pass
-    logger.info(f'J-Link firmware_version: {jlink.firmware_version}')
     logger.info(f'J-Link serial_number: {jlink.serial_number}')
+    logger.info(f'J-Link firmware_version: {jlink.firmware_version}')
+    logger.info(f'J-Link firmware_outdated: {jlink.firmware_outdated()}')
+    logger.info(f'J-Link firmware_newer: {jlink.firmware_newer()}')
 
     jlink.connect(device)
 
