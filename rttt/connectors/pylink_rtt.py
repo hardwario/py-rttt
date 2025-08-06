@@ -16,6 +16,7 @@ class PyLinkRTTConnector(Connector):
         self.block_address = block_address
         self.rtt_read_delay = latency / 1000.0
         self.is_running = False
+        self.thread = None
         self.terminal_buffer = terminal_buffer
         self.terminal_buffer_up_size = 0
         self.terminal_buffer_down_size = 0
@@ -77,7 +78,9 @@ class PyLinkRTTConnector(Connector):
         if not self.is_running:
             return
         self.is_running = False
-        self.thread.join()
+        if self.thread:
+            self.thread.join()
+            self.thread = None
         self.jlink.rtt_stop()
         self._emit(Event(EventType.CLOSE, ''))
         logger.info('RTT closed')
@@ -101,25 +104,26 @@ class PyLinkRTTConnector(Connector):
             for idx, num_bytes, event_type in channels:
                 if idx is None:
                     continue
+                try:
+                    data = self.jlink.rtt_read(idx, num_bytes)
+                    if data:
+                        lines = bytes(data).decode('utf-8', errors="backslashreplace")
+                        if lines:
+                            lines = self._cache[idx] + lines
 
-                data = self.jlink.rtt_read(idx, num_bytes)
-                if data:
-                    lines = bytes(data).decode('utf-8', errors="backslashreplace")
-                    if lines:
-                        lines = self._cache[idx] + lines
+                            while True:
+                                end = lines.find('\n')
+                                if end < 0:
+                                    self._cache[idx] = lines
+                                    break
 
-                        while True:
-                            end = lines.find('\n')
-                            if end < 0:
-                                self._cache[idx] = lines
-                                break
+                                line = lines[:end]
+                                lines = lines[end + 1:]
 
-                            line = lines[:end]
-                            lines = lines[end + 1:]
+                                if line.endswith('\r'):
+                                    line = line[:-1]
 
-                            if line.endswith('\r'):
-                                line = line[:-1]
-
-                            self._emit(Event(event_type, line))
-
+                                self._emit(Event(event_type, line))
+                except Exception as e:
+                    logger.error(f'Error reading RTT buffer {idx}: {e}')
             time.sleep(self.rtt_read_delay)
