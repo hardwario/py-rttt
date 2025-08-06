@@ -31,10 +31,10 @@ packages = [
 rttt = "rttt.cli:main"
 
 [tool.poetry.dependencies]
-python = ">=3.8, <4"
+python = ">=3.9, <4"
 click = "^8.1.8"
 loguru = "^0.7.3"
-prompt-toolkit = "^3.0.50"
+prompt-toolkit = "^3.0.51"
 pyperclip = "^1.9.0"
 pylink-square = "^1.6.0"
 psutil = "^7.0.0"
