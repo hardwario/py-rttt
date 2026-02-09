@@ -29,6 +29,7 @@ packages = [
 
 [tool.poetry.scripts]
 rttt = "rttt.cli:main"
+rttt-mcp = "rttt.mcp_server:main"
 
 [tool.poetry.dependencies]
 python = ">=3.9, <4"
@@ -39,6 +40,7 @@ pyperclip = "^1.9.0"
 pylink-square = "^1.6.0"
 psutil = "^7.0.0"
 pyyaml = "^6.0.2"
+mcp = {version = "^1.0", extras = ["cli"], python = ">=3.10"}
 
 [poetry.group.dev.dependencies]
 pycodestyle = "^2.12.1"
