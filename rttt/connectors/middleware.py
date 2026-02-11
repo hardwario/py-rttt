@@ -25,6 +25,9 @@ class Middleware(Connector):
     def _on(self, event: Event):
         self._emit(event)
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.connector!r})"
+
 
 class AsyncMiddleware(Middleware):
     """Middleware with a background asyncio loop for async processing.
