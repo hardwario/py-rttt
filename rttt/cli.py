@@ -6,7 +6,7 @@ import yaml
 import pylink
 from loguru import logger
 from rttt import __version__ as version
-from rttt.connectors import PyLinkRTTConnector, FileLogConnector, DemoConnector
+from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, DemoConnector
 from rttt.console import Console
 
 DEFAULT_LOG_FILE = os.path.expanduser("~/.hardwario/rttt.log")
@@ -76,7 +76,7 @@ def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, l
 
     if console_file:
         text = f'Device: {device} J-Link sn: {serial}' if serial else f'Device: {device}'
-        connector = FileLogConnector(connector, console_file, text=text)
+        connector = FileLogMiddleware(connector, console_file, text=text)
 
     console = Console(connector, history_file=history_file)
     console.run()

@@ -24,6 +24,7 @@ class PyLinkRTTConnector(Connector):
         self.log_up_size = 0
 
     def open(self):
+        super().open()
         self._cache = {0: '', 1: ''}
 
         logger.info(f"Opening RTT{' control block found at 0x{:08X}'.format(self.block_address) if self.block_address else ''}")
@@ -74,6 +75,7 @@ class PyLinkRTTConnector(Connector):
         logger.info('RTT opened')
 
     def close(self):
+        super().close()
         logger.info('Closing RTT')
         if not self.is_running:
             return

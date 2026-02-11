@@ -7,20 +7,22 @@ from rttt.event import Event
 class Connector(metaclass=ABCMeta):
 
     def __init__(self):
-        self._handlers = []
+        self._handler = None
 
     def on(self, handler: Callable[[Event], None]):
-        self._handlers.append(handler)
+        if self._handler is not None:
+            raise RuntimeError(f"Handler already set on {self.__class__.__name__}, call off() first")
+        self._handler = handler
 
-    def off(self, handler: Callable[[Event], None]):
-        try:
-            self._handlers.remove(handler)
-        except ValueError:
-            logger.error(f'handler {handler} not found')
+    def off(self):
+        self._handler = None
 
     def _emit(self, event: Event):
-        for handler in self._handlers:
-            handler(event)
+        if self._handler:
+            try:
+                self._handler(event)
+            except Exception as e:
+                logger.error(f"Error in handler: {e}")
 
     @abstractmethod
     def open(self):

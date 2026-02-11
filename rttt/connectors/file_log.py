@@ -1,12 +1,12 @@
 from datetime import datetime
-from typing import Callable
 import os
 from loguru import logger
 from rttt.event import Event, EventType
 from rttt.connectors.base import Connector
+from rttt.connectors.middleware import AsyncMiddleware
 
 
-class FileLogConnector(Connector):
+class FileLogMiddleware(AsyncMiddleware):
 
     lut = {
         EventType.LOG: ' # ',
@@ -15,38 +15,49 @@ class FileLogConnector(Connector):
     }
 
     def __init__(self, connector: Connector, file_path: str, text: str = '') -> None:
-        super().__init__()
+        super().__init__(connector)
         self.open_text = text
-        self.connector = connector
-        self.connector.on(self._on)
         logger.info(f'file_path: {file_path}')
         d = os.path.dirname(file_path)
         if d:
             os.makedirs(d, exist_ok=True)
-        self.fd = open(file_path, 'a')
+        self.fd = None
+        try:
+            self.fd = open(file_path, 'a', encoding='utf-8')
+        except Exception as e:
+            logger.error(f"Failed to open log file {file_path}: {e}")
 
     def open(self):
-        self.fd.write(f'{"*" * 80}\n')
-        center_text = f'{self.open_text:^74}'
-        self.fd.write(f'***{center_text}***\n')
-        self.fd.write(f'{"*" * 80}\n')
-        self.fd.flush()
-        self.connector.open()
+        if self.fd:
+            try:
+                self.fd.write(f'{"*" * 80}\n')
+                center_text = f'{self.open_text:^74}'
+                self.fd.write(f'***{center_text}***\n')
+                self.fd.write(f'{"*" * 80}\n')
+                self.fd.flush()
+            except Exception as e:
+                logger.error(f"Failed to write header to log file: {e}")
+        super().open()
 
     def close(self):
-        self.connector.close()
+        super().close()
+        if self.fd:
+            try:
+                self.fd.close()
+            except Exception as e:
+                logger.error(f"Failed to close log file: {e}")
+            self.fd = None
 
-    def handle(self, event: Event):
-        self.connector.handle(event)
-
-    def _on(self, event: Event):
-        logger.info(f'on: {event.type} {event.data}')
+    async def _process(self, event: Event):
         prefix = self.lut.get(event.type, None)
-        if prefix:
-            self._console_log(prefix, event.data)
-        self._emit(event)
+        if prefix and self.fd:
+            t = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
+            line = f'{t}{prefix}{event.data}\n'
+            await self._loop.run_in_executor(None, self._write_line, line)
 
-    def _console_log(self, prefix, line):
-        t = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
-        self.fd.write(f'{t}{prefix}{line}\n')
-        self.fd.flush()
+    def _write_line(self, line):
+        try:
+            self.fd.write(line)
+            self.fd.flush()
+        except Exception as e:
+            logger.error(f"Failed to write to log file: {e}")
