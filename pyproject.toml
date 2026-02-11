@@ -12,12 +12,12 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Operating System :: OS Independent",
     "Topic :: Utilities",
     "Environment :: Console"
@@ -31,14 +31,13 @@ packages = [
 rttt = "rttt.cli:main"
 
 [tool.poetry.dependencies]
-python = ">=3.9, <4"
-click = "^8.1.8"
+python = ">=3.10, <4"
+click = "^8.3.1"
 loguru = "^0.7.3"
-prompt-toolkit = "^3.0.51"
-pyperclip = "^1.9.0"
+prompt-toolkit = "^3.0.52"
+pyperclip = "^1.11.0"
 pylink-square = "^1.6.0"
-psutil = "^7.0.0"
-pyyaml = "^6.0.2"
+pyyaml = "^6.0.3"
 
 [poetry.group.dev.dependencies]
 pycodestyle = "^2.12.1"
