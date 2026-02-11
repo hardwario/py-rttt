@@ -33,3 +33,14 @@ def shutdown_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread | No
         thread.join()
     if not loop.is_closed():
         loop.close()
+
+
+def parse_listen(listen: str, default_host: str = '127.0.0.1', default_port: int = 8090) -> tuple[str, int]:
+    """Parse a listen address string into (host, port).
+
+    Accepts formats: 'host:port', ':port', 'port'.
+    """
+    if ':' in listen:
+        host, port_str = listen.rsplit(':', 1)
+        return (host or default_host), int(port_str)
+    return default_host, int(listen)

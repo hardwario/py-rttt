@@ -67,6 +67,8 @@ Options:
   --latency INTEGER          Latency for RTT readout in ms. [default: 50]
   --history-file PATH        Path to history file. [default: ~/.rttt_history]
   --console-file PATH        Path to console file. [default: ~/.rttt_console]
+  --mcp / --no-mcp           Enable MCP server. [default: no-mcp]
+  --mcp-listen TEXT           MCP server listen address [host:]port. [default: 127.0.0.1:8090]
   --help                     Show this message and exit.
 ```
 
@@ -100,6 +102,40 @@ With this configuration, simply running:
 ```bash
 rttt
 ```
+
+## MCP Server (AI Integration)
+
+RTTT includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that allows AI tools (Claude, Cursor, etc.) to interact with your embedded device via RTT.
+
+MCP server is enabled by default. Start RTTT as usual:
+
+```bash
+rttt --device NRF52840_xxAA --mcp
+```
+
+### Claude Code Configuration
+
+Add to your `.mcp.json`:
+
+```json
+{
+    "mcpServers": {
+        "rttt": {
+            "type": "http",
+            "url": "http://127.0.0.1:8090/mcp"
+        }
+    }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|---|---|
+| `send_command(command, timeout)` | Send a shell command to the device via RTT and wait for response |
+| `read_terminal(lines)` | Read recent terminal output (device responses and sent commands) |
+| `read_log(lines, after_cursor)` | Read recent log output from the device |
+| `status()` | Get RTT session statistics (line counts, buffer usage, cursors) |
 
 ## License
 

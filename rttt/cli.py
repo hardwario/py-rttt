@@ -6,13 +6,14 @@ import yaml
 import pylink
 from loguru import logger
 from rttt import __version__ as version
-from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, DemoConnector
+from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, DemoConnector
 from rttt.console import Console
 
 DEFAULT_LOG_FILE = os.path.expanduser("~/.hardwario/rttt.log")
 DEFAULT_HISTORY_FILE = os.path.expanduser(f"~/.rttt_history")
 DEFAULT_CONSOLE_FILE = os.path.expanduser(f"~/.rttt_console")
 DEFAULT_JLINK_SPEED_KHZ = 2000
+DEFAULT_MCP_LISTEN = '127.0.0.1:8090'
 
 
 def get_default_map():
@@ -46,7 +47,9 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--latency', type=int, help='Latency for RTT readout in ms.', show_default=True, default=50)
 @click.option('--history-file', type=click.Path(writable=True), show_default=True, default=DEFAULT_HISTORY_FILE)
 @click.option('--console-file', type=click.Path(writable=True), show_default=True, default=DEFAULT_CONSOLE_FILE)
-def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file):
+@click.option('--mcp/--no-mcp', is_flag=True, help='Enable MCP server.', show_default=True, default=False)
+@click.option('--mcp-listen', type=str, help='MCP server listen address [host:]port.', show_default=True, default=DEFAULT_MCP_LISTEN)
+def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     jlink = pylink.JLink()
@@ -73,6 +76,9 @@ def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, l
         time.sleep(1)
 
     connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address)
+
+    if mcp:
+        connector = MCPMiddleware(connector, listen=mcp_listen)
 
     if console_file:
         text = f'Device: {device} J-Link sn: {serial}' if serial else f'Device: {device}'
