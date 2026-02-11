@@ -1,4 +1,3 @@
-from typing import Callable
 import time
 import threading
 from loguru import logger
@@ -18,12 +17,14 @@ class DemoConnector(Connector):
         self._emit(event)
 
     def open(self):
+        super().open()
         logger.info('open')
         self.is_running = True
         self.thread = threading.Thread(target=self._task, daemon=True)
         self.thread.start()
 
     def close(self):
+        super().close()
         logger.info('close')
         if not self.is_running:
             return

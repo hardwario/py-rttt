@@ -103,7 +103,7 @@ class Console:
         async def event_task():
             with logger.catch(message='event_task', reraise=True):
                 while True:
-                    event = await self.evets.get()
+                    event = await self.events.get()
                     logger.debug(f'event: {str(event.type)} {event.data}')
                     if event.type == EventType.LOG:
                         self._buffer_insert_text(self.logger_buffer, f'{event.data}\n')
@@ -113,11 +113,11 @@ class Console:
                         self._buffer_insert_text(self.terminal_buffer, f'{event.data}\n')
 
         def pre_run():
-            self.evets = asyncio.Queue()
+            self.events = asyncio.Queue()
 
             def connector_handle_event(event: Event):
                 try:
-                    self.evets.put_nowait(event)
+                    self.events.put_nowait(event)
                 except Exception as e:
                     logger.exception(f"Failed to queue event: {event}")
 
