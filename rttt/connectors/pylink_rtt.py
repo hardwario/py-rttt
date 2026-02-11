@@ -1,5 +1,3 @@
-
-from typing import Callable
 import pylink
 import time
 import threading
@@ -42,7 +40,7 @@ class PyLinkRTTConnector(Connector):
             raise Exception('Failed to find RTT block')
 
         if num_up == 0:
-            raise Exception('No RTT down buffers found')
+            raise Exception('No RTT up buffers found')
 
         if num_up < self.terminal_buffer:
             raise Exception(f'Shell buffer UP {self.terminal_buffer} not found')
@@ -90,7 +88,9 @@ class PyLinkRTTConnector(Connector):
     def handle(self, event: Event):
         logger.info(f'handle: {event.type} {event.data}')
         if event.type == EventType.IN:
-            logger.info(f'RTT write shell buffer {self.terminal_buffer} bufer size {self.terminal_buffer_down_size}')
+            logger.info(f'RTT write shell buffer {self.terminal_buffer} buffer size {self.terminal_buffer_down_size}')
+            if not self.terminal_buffer_down_size:
+                raise Exception(f'Shell buffer DOWN {self.terminal_buffer} has zero size')
             data = bytearray(f'{event.data}\n', "utf-8")
             for i in range(0, len(data), self.terminal_buffer_down_size):
                 chunk = data[i:i + self.terminal_buffer_down_size]
