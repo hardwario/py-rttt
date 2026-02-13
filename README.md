@@ -58,7 +58,7 @@ Usage: rttt [OPTIONS]
 Options:
   --version                  Show the version and exit.
   --serial SERIAL_NUMBER     J-Link serial number.
-  --device DEVICE            J-Link Device name. [required]
+  --device DEVICE            J-Link Device name.
   --speed SPEED              J-Link clock speed in kHz. [default: 2000]
   --reset                    Reset application firmware.
   --address ADDRESS          RTT block address.
@@ -132,10 +132,11 @@ Add to your `.mcp.json`:
 
 | Tool | Description |
 |---|---|
-| `send_command(command, timeout)` | Send a shell command to the device via RTT and wait for response |
+| `send_command(command, timeout)` | Send a shell command to the device and wait for response |
 | `read_terminal(lines)` | Read recent terminal output (device responses and sent commands) |
-| `read_log(lines, after_cursor)` | Read recent log output from the device |
-| `status()` | Get RTT session statistics (line counts, buffer usage, cursors) |
+| `read_log(lines, after_cursor, pattern)` | Read log output from the device ring buffer, with optional regex filter |
+| `status()` | Get session statistics (line counts, buffer usage, cursors) |
+| `flash(file_path, addr)` | Flash a firmware file (.hex, .bin, .elf, .srec) to the target device |
 
 ## License
 
