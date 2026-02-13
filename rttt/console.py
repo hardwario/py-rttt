@@ -11,6 +11,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
 from prompt_toolkit.filters import Condition
 from rttt.ui import State, create_layout
+from rttt.utils import truncate_path
 from rttt.connectors.base import Connector
 from rttt.event import Event, EventType
 
@@ -94,6 +95,7 @@ class Console:
                 'border': '#888888',
                 'message': 'bg:#bbee88 #222222',
                 'statusbar': 'noreverse bg:gray #000000',
+                'progress-bar.used': 'bg:#4488cc',
             }, priority=Priority.MOST_PRECISE)
         )
 
@@ -111,6 +113,23 @@ class Console:
                         self._buffer_insert_text(self.terminal_buffer, f'{event.data}\n')
                     elif event.type == EventType.IN:
                         self._buffer_insert_text(self.terminal_buffer, f'{event.data}\n')
+                    elif event.type == EventType.FLASH:
+                        data = event.data
+                        status = data.get("status", "")
+                        if status == "start":
+                            self.state.flash_file = truncate_path(data.get("file", ""))
+                            self.state.flash_action = ""
+                            self.state.flash_error = ""
+                            self.state.flash_bar.percentage = 0
+                            self.state.flash_visible = True
+                        elif status == "progress":
+                            self.state.flash_bar.percentage = min(data.get("percentage", 0), 100)
+                            self.state.flash_action = data.get("action", "")
+                        elif status == "done":
+                            self.state.flash_visible = False
+                        elif status == "error":
+                            self.state.flash_error = data.get("message", "Flash error")
+                        self.app.invalidate()
 
         def pre_run():
             self.events = asyncio.Queue()

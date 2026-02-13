@@ -1,3 +1,4 @@
+import os
 import pylink
 import time
 import threading
@@ -20,12 +21,13 @@ class PyLinkRTTConnector(Connector):
         self.terminal_buffer_down_size = 0
         self.logger_buffer = logger_buffer
         self.log_up_size = 0
+        self._flash_lock = threading.Lock()
 
-    def open(self):
-        super().open()
+    def start(self):
+        """Start RTT and the read thread."""
         self._cache = {0: '', 1: ''}
 
-        logger.info(f"Opening RTT{' control block found at 0x{:08X}'.format(self.block_address) if self.block_address else ''}")
+        logger.info(f"Starting RTT{' control block found at 0x{:08X}'.format(self.block_address) if self.block_address else ''}")
         self.jlink.rtt_start(self.block_address)
 
         for _ in range(100):
@@ -69,12 +71,8 @@ class PyLinkRTTConnector(Connector):
         self.thread = threading.Thread(target=self._read_task, daemon=True)
         self.thread.start()
 
-        self._emit(Event(EventType.OPEN, ''))
-        logger.info('RTT opened')
-
-    def close(self):
-        super().close()
-        logger.info('Closing RTT')
+    def stop(self):
+        """Stop the read thread and RTT."""
         if not self.is_running:
             return
         self.is_running = False
@@ -82,6 +80,17 @@ class PyLinkRTTConnector(Connector):
             self.thread.join()
             self.thread = None
         self.jlink.rtt_stop()
+
+    def open(self):
+        super().open()
+        self.start()
+        self._emit(Event(EventType.OPEN, ''))
+        logger.info('RTT opened')
+
+    def close(self):
+        super().close()
+        logger.info('Closing RTT')
+        self.stop()
         self._emit(Event(EventType.CLOSE, ''))
         logger.info('RTT closed')
 
@@ -95,7 +104,80 @@ class PyLinkRTTConnector(Connector):
             for i in range(0, len(data), self.terminal_buffer_down_size):
                 chunk = data[i:i + self.terminal_buffer_down_size]
                 self.jlink.rtt_write(self.terminal_buffer, list(chunk))
+        elif event.type == EventType.FLASH:
+            self.flash(event.data.get('file'), event.data.get('addr', 0))
+            return
         self._emit(event)
+
+    def flash(self, file_path: str, addr: int = 0):
+        """Flash firmware file to device. Stops RTT, flashes, restarts RTT."""
+        if not self._flash_lock.acquire(blocking=False):
+            self._emit(Event(EventType.FLASH, {
+                "status": "error", "file": file_path,
+                "error": "Flash operation already in progress"
+            }))
+            return
+
+        try:
+            if not os.path.isfile(file_path):
+                self._emit(Event(EventType.FLASH, {
+                    "status": "error", "file": file_path,
+                    "error": f"File not found: {file_path}"
+                }))
+                return
+
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext not in ('.hex', '.bin', '.elf', '.srec'):
+                self._emit(Event(EventType.FLASH, {
+                    "status": "error", "file": file_path,
+                    "error": f"Unsupported file format: {ext}"
+                }))
+                return
+
+            self._emit(Event(EventType.FLASH, {"status": "start", "file": file_path}))
+
+            was_running = self.is_running
+            if was_running:
+                self.stop()
+
+            def on_progress(action, progress_string, percentage):
+                if isinstance(action, bytes):
+                    action = action.decode('utf-8', errors='replace')
+                if isinstance(progress_string, bytes):
+                    progress_string = progress_string.decode('utf-8', errors='replace')
+                if action == "Erase":
+                    return
+                self._emit(Event(EventType.FLASH, {
+                    "status": "progress", "action": action,
+                    "message": progress_string,
+                    "percentage": min(percentage, 100),
+                }))
+
+            try:
+                logger.info(f'Flash: flashing {file_path} at 0x{addr:08X}')
+                bytes_flashed = self.jlink.flash_file(file_path, addr, on_progress=on_progress)
+                logger.info(f'Flash: complete, {bytes_flashed} bytes')
+                self.jlink.reset(ms=10, halt=False)
+                self._emit(Event(EventType.FLASH, {
+                    "status": "done", "file": file_path, "bytes_flashed": bytes_flashed
+                }))
+            except Exception as e:
+                logger.error(f'Flash error: {e}')
+                self._emit(Event(EventType.FLASH, {
+                    "status": "error", "file": file_path, "error": str(e)
+                }))
+
+            if was_running:
+                try:
+                    self.start()
+                except Exception as e:
+                    logger.error(f'Flash: failed to restart RTT: {e}')
+                    self._emit(Event(EventType.FLASH, {
+                        "status": "error", "file": file_path,
+                        "error": f"RTT restart failed: {e}"
+                    }))
+        finally:
+            self._flash_lock.release()
 
     def _read_task(self):
         while self.is_running:

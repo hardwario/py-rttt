@@ -8,6 +8,7 @@ class EventType(enum.Enum):
     OUT = 'out'  # terminal line out
     IN = 'in'    # terminal line in
     LOG = 'log'  # logger line out
+    FLASH = 'flash'  # flash programming event
 
 
 class Event:

@@ -44,3 +44,14 @@ def parse_listen(listen: str, default_host: str = '127.0.0.1', default_port: int
         host, port_str = listen.rsplit(':', 1)
         return (host or default_host), int(port_str)
     return default_host, int(listen)
+
+
+def truncate_path(path, max_length=100):
+    """Truncate path to last 4 directory levels if longer than max_length."""
+    if len(path) <= max_length:
+        return path
+    parts = path.replace("\\", "/").split("/")
+    # Keep last 4 parts (3 dirs + filename)
+    if len(parts) > 4:
+        return ".../" + "/".join(parts[-4:])
+    return path

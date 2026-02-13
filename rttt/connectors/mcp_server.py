@@ -1,4 +1,5 @@
 import asyncio
+import os
 from collections import deque
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
@@ -16,7 +17,7 @@ class MCPMiddleware(AsyncMiddleware):
     Uses Streamable HTTP transport.
     """
 
-    def __init__(self, connector: Connector, listen: str = "127.0.0.1:8090", max_lines: int = 5000):
+    def __init__(self, connector: Connector, listen: str = "127.0.0.1:8090", max_lines: int = 5000, name: str = "Device Console"):
         super().__init__(connector)
         self.host, self.port = parse_listen(listen)
         self.max_lines = max_lines
@@ -25,7 +26,9 @@ class MCPMiddleware(AsyncMiddleware):
         self._terminal_cursor = 0
         self._log_cursor = 0
         self._terminal_event = asyncio.Event()
-        self._mcp = FastMCP("RTTT", host=self.host, port=self.port, log_level="CRITICAL", stateless_http=True)
+        self._flash_events = []
+        self._flash_done = None
+        self._mcp = FastMCP(name, host=self.host, port=self.port, log_level="CRITICAL", stateless_http=True)
         self._register_tools()
         self._server_task = None
 
@@ -54,13 +57,17 @@ class MCPMiddleware(AsyncMiddleware):
         elif event.type == EventType.LOG:
             self._log_lines.append(event.data)
             self._log_cursor += 1
+        elif event.type == EventType.FLASH:
+            self._flash_events.append(event.data)
+            if event.data.get("status") in ("done", "error") and self._flash_done is not None:
+                self._flash_done.set()
 
     def _register_tools(self):
         middleware = self
 
         @self._mcp.tool()
         async def send_command(command: str, timeout: float = 2.0) -> dict:
-            """Send a shell command to the connected device via RTT.
+            """Send a shell command to the connected device.
 
             Waits up to `timeout` seconds for the device to finish responding,
             then returns all terminal output produced after the command along
@@ -116,31 +123,39 @@ class MCPMiddleware(AsyncMiddleware):
             return list(middleware._terminal_lines)[-lines:]
 
         @self._mcp.tool()
-        def read_log(lines: int = 100, after_cursor: int = -1) -> list:
-            """Read recent log output from the device. Returns JSON array of log lines.
+        def read_log(lines: int = -1, after_cursor: int = -1, pattern: str = "") -> list:
+            """Read log output from the device. Logs are kept in a ring buffer
+            and can be read repeatedly. If you need buffer state, use the `status` tool.
 
-            If `after_cursor` is provided (from a previous `send_command` result),
-            returns only the log lines that appeared after that cursor position.
-            Otherwise returns the last `lines` entries.
+            Args:
+                lines: Number of lines to return (-1 = all buffered).
+                after_cursor: Return only lines after this cursor (from `send_command`).
+                pattern: Regex filter (case-insensitive). Only matching lines are returned.
             """
+            import re
             all_logs = list(middleware._log_lines)
             if after_cursor >= 0:
-                # log_cursor is the total count at command time.
-                # The deque holds the last max_lines entries.
-                # Offset into the deque: how many entries from the end were after the cursor.
                 total = middleware._log_cursor
                 available = len(all_logs)
                 skip = after_cursor - (total - available)
                 if skip < 0:
                     skip = 0
                 result = all_logs[skip:]
+            elif lines >= 0:
+                result = all_logs[-lines:] if lines > 0 else []
             else:
-                result = all_logs[-lines:]
+                result = all_logs
+            if pattern:
+                try:
+                    regex = re.compile(pattern, re.IGNORECASE)
+                    result = [line for line in result if regex.search(line)]
+                except re.error:
+                    pass
             return result
 
         @self._mcp.tool()
         def status() -> dict:
-            """Get RTT session statistics: total and buffered terminal/log line counts and current cursors."""
+            """Get session statistics: total and buffered terminal/log line counts and current cursors."""
             return {
                 "terminal_total": middleware._terminal_cursor,
                 "terminal_buffered": len(middleware._terminal_lines),
@@ -148,3 +163,55 @@ class MCPMiddleware(AsyncMiddleware):
                 "log_buffered": len(middleware._log_lines),
                 "buffer_size": middleware.max_lines,
             }
+
+        @self._mcp.tool()
+        async def flash(file_path: str, addr: int = 0) -> dict:
+            """Flash a firmware file (.hex, .bin, .elf, .srec) to the target device.
+
+            Stops the connection, programs the flash memory, resets the device,
+            and restarts the connection. Progress is reported to the console during flashing.
+
+            Common firmware locations:
+            - Zephyr/west: build/merged.hex (or build/<app>/merged.hex)
+            - nRF Connect SDK: build/merged.hex
+            - Generic: build/firmware.hex, build/output.bin
+
+            Args:
+                file_path: Absolute path to the firmware file.
+                addr: Start address for flashing (default 0, ignored for .hex files).
+            """
+            if not os.path.isfile(file_path):
+                return {"status": "error", "error": f"File not found: {file_path}"}
+
+            middleware._flash_events = []
+            middleware._flash_done = asyncio.Event()
+
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    middleware.connector.handle,
+                    Event(EventType.FLASH, {"file": file_path, "addr": addr})
+                )
+
+                try:
+                    await asyncio.wait_for(middleware._flash_done.wait(), timeout=120.0)
+                except asyncio.TimeoutError:
+                    return {"status": "error", "error": "Flash operation timed out"}
+
+                final = middleware._flash_events[-1] if middleware._flash_events else {}
+                result = {
+                    "status": final.get("status", "unknown"),
+                    "file": file_path,
+                    "events": middleware._flash_events,
+                }
+                if "bytes_flashed" in final:
+                    result["bytes_flashed"] = final["bytes_flashed"]
+                if "error" in final:
+                    result["error"] = final["error"]
+                return result
+
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+            finally:
+                middleware._flash_done = None

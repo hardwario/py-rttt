@@ -12,6 +12,7 @@ class FileLogMiddleware(AsyncMiddleware):
         EventType.LOG: ' # ',
         EventType.OUT: ' > ',
         EventType.IN: ' < ',
+        EventType.FLASH: ' ! ',
     }
 
     def __init__(self, connector: Connector, file_path: str, text: str = '') -> None:
@@ -52,7 +53,16 @@ class FileLogMiddleware(AsyncMiddleware):
         prefix = self.lut.get(event.type, None)
         if prefix and self.fd:
             t = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
-            line = f'{t}{prefix}{event.data}\n'
+            if event.type == EventType.FLASH:
+                data = event.data
+                status = data.get("status", "")
+                if status == "progress":
+                    text = f'FLASH [{data.get("percentage", 0):3d}%] {data.get("action", "")}'
+                else:
+                    text = f'FLASH {status}: {data}'
+            else:
+                text = event.data
+            line = f'{t}{prefix}{text}\n'
             await self._loop.run_in_executor(None, self._write_line, line)
 
     def _write_line(self, line):

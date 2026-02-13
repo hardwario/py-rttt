@@ -5,7 +5,6 @@ from prompt_toolkit.layout.margins import NumberedMargin, ScrollbarMargin
 from prompt_toolkit.layout.dimension import LayoutDimension
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.layout.layout import Layout
-from prompt_toolkit.formatted_text import FormattedText
 from datetime import datetime
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.application import get_app
@@ -23,6 +22,11 @@ class State:
         self.scroll_to_end = True
         self.show = self.SHOW_ALL
         self.app = None
+        self.flash_visible = False
+        self.flash_file = ""
+        self.flash_action = ""
+        self.flash_error = ""
+        self.flash_bar = None
 
     def is_show_status_bar(self):
         return self.show_status_bar
@@ -170,6 +174,36 @@ def create_layout(state, history_file):
         logger_search
     ])
 
+    flash_bar = ProgressBar()
+    state.flash_bar = flash_bar
+
+    flash_overlay = Float(
+        content=ConditionalContainer(
+            content=Box(
+                body=Frame(
+                    body=HSplit([
+                        Window(FormattedTextControl(lambda: state.flash_file), height=1, align=WindowAlign.CENTER),
+                        Window(height=1),
+                        ConditionalContainer(
+                            content=HSplit([
+                                Window(FormattedTextControl(lambda: state.flash_action), height=1, align=WindowAlign.CENTER),
+                                flash_bar,
+                            ]),
+                            filter=Condition(lambda: not state.flash_error),
+                        ),
+                        ConditionalContainer(
+                            content=Window(FormattedTextControl(lambda: state.flash_error), height=1, align=WindowAlign.CENTER, style="fg:#ff4444 bold"),
+                            filter=Condition(lambda: bool(state.flash_error)),
+                        ),
+                    ]),
+                    title="Flash",
+                ),
+                style="bg:#222222 fg:#eeeeee",
+            ),
+            filter=Condition(lambda: state.flash_visible),
+        ),
+    )
+
     root_container = FloatContainer(
         content=HSplit(
             [
@@ -192,8 +226,7 @@ def create_layout(state, history_file):
                 status_bar
             ]
         ),
-        floats=[
-        ],
+        floats=[flash_overlay],
         style="bg:#111111 fg:#eeeeee",
     )
 

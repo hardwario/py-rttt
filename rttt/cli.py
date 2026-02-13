@@ -38,7 +38,7 @@ class IntOrHexParamType(click.ParamType):
 @click.command('rttt')
 @click.version_option(version, prog_name='rttt')
 @click.option('--serial', type=int, metavar='SERIAL_NUMBER', help='J-Link serial number', show_default=True)
-@click.option('--device', type=str, metavar='DEVICE', help='J-Link Device name', required=True, prompt=True, show_default=True)
+@click.option('--device', type=str, metavar='DEVICE', help='J-Link Device name')
 @click.option('--speed', type=int, metavar="SPEED", help='J-Link clock speed in kHz', default=DEFAULT_JLINK_SPEED_KHZ, show_default=True)
 @click.option('--reset', is_flag=True, help='Reset application firmware.')
 @click.option('--address', metavar="ADDRESS", type=IntOrHexParamType(), help='RTT block address.')
@@ -51,6 +51,9 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--mcp-listen', type=str, help='MCP server listen address [host:]port.', show_default=True, default=DEFAULT_MCP_LISTEN)
 def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
+
+    if not device:
+        device = click.prompt('Device')
 
     jlink = pylink.JLink()
     jlink.open(serial_no=serial)

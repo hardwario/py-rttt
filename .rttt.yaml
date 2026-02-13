@@ -1,0 +1,4 @@
+#device: NRF9151_XXCA
+device: nRF54L15_M33
+console_file: "test.log"
+mcp: true
