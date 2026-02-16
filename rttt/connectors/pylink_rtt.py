@@ -57,14 +57,22 @@ class PyLinkRTTConnector(Connector):
 
         for i in range(num_up):
             desc = self.jlink.rtt_get_buf_descriptor(i, 1)
-            logger.info(f'Up buffer {i}: {desc}')
+            try:
+                name = desc.name
+            except UnicodeDecodeError:
+                name = desc.acName.decode('utf-8', errors='replace')
+            logger.info(f'Up buffer {i}: {name} <Index={desc.BufferIndex}, Size={desc.SizeOfBuffer}>')
             if i == self.terminal_buffer:
                 self.terminal_buffer_up_size = desc.SizeOfBuffer
             elif i == self.logger_buffer:
                 self.log_up_size = desc.SizeOfBuffer
         for i in range(num_down):
             desc = self.jlink.rtt_get_buf_descriptor(i, 0)
-            logger.info(f'Down buffer {i}: {desc}')
+            try:
+                name = desc.name
+            except UnicodeDecodeError:
+                name = desc.acName.decode('utf-8', errors='replace')
+            logger.info(f'Down buffer {i}: {name} <Index={desc.BufferIndex}, Size={desc.SizeOfBuffer}>')
             if i == self.terminal_buffer:
                 self.terminal_buffer_down_size = desc.SizeOfBuffer
 
