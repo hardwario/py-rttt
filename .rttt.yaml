@@ -1,4 +1,10 @@
-#device: NRF9151_XXCA
+# device: NRF9151_XXCA
 device: nRF54L15_M33
 console_file: "test.log"
 mcp: true
+substitutions:
+  RTC_SET: "rtc set {{UTC_NOW}}"
+  GIT_SHA:
+    shell: "git rev-parse --short HEAD"
+  LORA_KEY:
+    shell: "openssl rand -hex 16 | tr a-z A-Z"

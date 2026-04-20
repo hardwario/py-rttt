@@ -4,6 +4,7 @@ from rttt.connectors.demo import DemoConnector
 from rttt.connectors.file_log import FileLogMiddleware
 from rttt.connectors.mcp_server import MCPMiddleware
 from rttt.connectors.pylink_rtt import PyLinkRTTConnector
+from rttt.connectors.substitution import SubstitutionMiddleware
 
 # Backward compatibility alias (deprecated, use FileLogMiddleware)
 FileLogConnector = FileLogMiddleware

@@ -69,6 +69,11 @@ Options:
   --console-file PATH        Path to console file. [default: ~/.rttt_console]
   --mcp / --no-mcp           Enable MCP server. [default: no-mcp]
   --mcp-listen TEXT           MCP server listen address [host:]port. [default: 127.0.0.1:8090]
+  --substitutions / --no-substitutions
+                             Enable template substitutions in terminal input.
+                             [default: substitutions]
+  --trust-shells             Trust shell substitutions in config without
+                             interactive prompt (for CI/scripts).
   --help                     Show this message and exit.
 ```
 
@@ -96,12 +101,86 @@ RTTT supports configuration via a `.rttt.yaml` file, which can be placed in the 
 ```yaml
 device: NRF9151_XXCA
 console_file: "test.log"
+substitutions:
+  RTC_SET: "rtc set {{UTC_NOW}}"
 ```
 
 With this configuration, simply running:
 ```bash
 rttt
 ```
+
+## Input Substitutions
+
+RTTT can expand `{{NAME}}` placeholders in commands you type in the terminal before they are sent to the device. This is handy for things like setting the current time on the device without typing it manually:
+
+```
+rtc set {{UTC_NOW}}
+```
+
+gets expanded to (example):
+
+```
+rtc set 2026/04/20 10:08:00
+```
+
+### Built-in Substitutions
+
+| Placeholder | Output | Notes |
+|---|---|---|
+| `{{UTC_NOW}}` | `2026/04/20 10:08:00` | UTC, default format `%Y/%m/%d %H:%M:%S` |
+| `{{UTC_NOW:<fmt>}}` | e.g. `2026-04-20` | Any `strftime` format, e.g. `{{UTC_NOW:%Y-%m-%d}}` |
+| `{{LOCAL_NOW}}` | `2026/04/20 12:08:00` | Local time, same default format |
+| `{{LOCAL_NOW:<fmt>}}` | e.g. `12:08:00` | Any `strftime` format |
+| `{{UNIX_NOW}}` | `1776636480` | Unix timestamp (seconds), format is ignored |
+
+Placeholder names must be upper-case letters, digits, and underscores, and start with a letter or underscore.
+
+### Custom Substitutions
+
+Define your own values in `.rttt.yaml` under the `substitutions` key. Values are strings and may reference other substitutions (built-in or custom):
+
+```yaml
+substitutions:
+  RTC_SET: "rtc set {{UTC_NOW}}"
+  PROJECT: "nrf9151-demo"
+  HEADER: "DEV={{PROJECT}} T={{UTC_NOW}}"
+```
+
+Then typing `{{RTC_SET}}` in the terminal sends e.g. `rtc set 2026/04/20 10:08:00` to the device.
+
+Custom names take precedence over built-ins, so you can override `UTC_NOW` with a fixed value if needed.
+
+### Shell Substitutions
+
+A substitution value can also be a shell command, evaluated lazily each time the placeholder is expanded:
+
+```yaml
+substitutions:
+  GIT_SHA:
+    shell: "git rev-parse --short HEAD"
+  BUILD_HEADER: "build={{GIT_SHA}} at {{UTC_NOW}}"
+```
+
+Options for a `shell:` entry:
+
+| Key | Default | Description |
+|---|---|---|
+| `shell` | (required) | Command passed to `/bin/sh -c`. |
+| `cwd` | current working directory | Directory to run the command in. `~` is expanded. |
+| `multiline` | `false` | If `true`, the full output is used (newlines in it cause the command to be split and sent as multiple lines to the device). If `false`, only the first line is used. |
+
+Commands have a 5 second timeout. On failure (non-zero exit, timeout, or missing binary), the placeholder is left in the text and a warning is logged.
+
+**Trust prompt.** Because a `.rttt.yaml` in a project you didn't write could run commands on your machine, `rttt` asks for confirmation the first time it sees a new set of shell substitutions. The approval is cached in `~/.hardwario/rttt_allowed_shells` as a hash of the command list plus the absolute config path — you only get asked again if the commands actually change. For non-interactive use (CI, scripts), pass `--trust-shells` to skip the prompt.
+
+### Enabling / Disabling
+
+Substitutions are **enabled by default**, so built-ins like `{{UTC_NOW}}` work out of the box. Use `--no-substitutions` on the command line to disable them for a single session (for example if you actually need to send the literal text `{{UTC_NOW}}` to the device).
+
+### Errors
+
+If a placeholder name is unknown, references itself (cycle), or the format string fails, the placeholder is left in the text as-is and a warning is written to `~/.hardwario/rttt.log`. The command is still sent to the device so you don't lose keystrokes.
 
 ## MCP Server (AI Integration)
 

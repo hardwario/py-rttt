@@ -39,6 +39,9 @@ pylink-square = "^2.0.0"
 pyyaml = "^6.0.3"
 mcp = "^1.9"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
+
 [poetry.group.dev.dependencies]
 pycodestyle = "^2.12.1"
 
