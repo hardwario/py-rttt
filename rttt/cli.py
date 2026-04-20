@@ -60,18 +60,30 @@ def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, l
     jlink.set_speed(speed)
     jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
 
-    logger.info(f'J-Link dll version: {jlink.version}')
-    logger.info(f'J-Link dll compile_date: {jlink.compile_date}')
-    try:
-        logger.info(f'J-Link dll path: {jlink._library._path}')
-    except Exception as _:
-        pass
-    logger.info(f'J-Link serial_number: {jlink.serial_number}')
-    logger.info(f'J-Link firmware_version: {jlink.firmware_version}')
-    logger.info(f'J-Link firmware_outdated: {jlink.firmware_outdated()}')
-    logger.info(f'J-Link firmware_newer: {jlink.firmware_newer()}')
+    for label, getter in (
+        ('dll version', lambda: jlink.version),
+        ('dll compile_date', lambda: jlink.compile_date),
+        ('dll path', lambda: jlink._library._path),
+        ('serial_number', lambda: jlink.serial_number),
+        ('firmware_version', lambda: jlink.firmware_version),
+        ('firmware_outdated', jlink.firmware_outdated),
+        ('firmware_newer', jlink.firmware_newer),
+    ):
+        try:
+            logger.info(f'J-Link {label}: {getter()}')
+        except Exception:
+            pass
 
-    jlink.connect(device)
+    for attempt in range(3):
+        try:
+            jlink.connect(device)
+            break
+        except pylink.errors.JLinkException as e:
+            if attempt < 2:
+                logger.warning(f'Connect attempt {attempt + 1} failed: {e}, retrying...')
+                time.sleep(0.5)
+            else:
+                raise
 
     if reset:
         jlink.reset()
