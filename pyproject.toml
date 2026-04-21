@@ -31,13 +31,13 @@ rttt = "rttt.cli:main"
 
 [tool.poetry.dependencies]
 python = ">=3.10, <4"
-click = "^8.3.1"
+click = "^8.3.2"
 loguru = "^0.7.3"
 prompt-toolkit = "^3.0.52"
 pyperclip = "^1.11.0"
-pylink-square = "^2.0.0"
+pylink-square = "^2.0.1"
 pyyaml = "^6.0.3"
-mcp = "^1.9"
+mcp = "^1.27"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
