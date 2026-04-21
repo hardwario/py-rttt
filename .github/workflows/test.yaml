@@ -63,6 +63,9 @@ jobs:
       - name: Install dependencies
         run: poetry sync --no-interaction
 
+      - name: Run tests
+        run: poetry run pytest
+
       - name: Test run
         run: poetry run rttt --version
 

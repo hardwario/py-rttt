@@ -33,13 +33,14 @@ BUILTINS = {
 }
 
 
-def _run_shell(name: str, spec: dict) -> str:
+def run_shell(name: str, spec: dict) -> str:
     command = spec.get('shell', '')
     cwd = spec.get('cwd') or None
     multiline = bool(spec.get('multiline', False))
     if cwd:
         cwd = os.path.expanduser(cwd)
 
+    logger.info(f'{name}: exec: {command!r} cwd={cwd or os.getcwd()}')
     result = subprocess.run(
         command,
         shell=True,
@@ -49,15 +50,15 @@ def _run_shell(name: str, spec: dict) -> str:
         timeout=SHELL_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
+        logger.info(f'{name}: exit: {result.returncode} stderr: {result.stderr.strip()!r}')
         raise RuntimeError(
             f'shell exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}'
         )
 
     stdout = result.stdout
-    if multiline:
-        return stdout.strip()
-    lines = stdout.splitlines()
-    return lines[0].strip() if lines else ''
+    value = stdout.strip() if multiline else (stdout.splitlines()[0].strip() if stdout.splitlines() else '')
+    logger.info(f'{name}: result: {value!r}')
+    return value
 
 
 class SubstitutionMiddleware(Middleware):
@@ -88,11 +89,14 @@ class SubstitutionMiddleware(Middleware):
 
             if name in self.custom:
                 spec = self.custom[name]
+                is_shell = isinstance(spec, dict) and 'shell' in spec
                 try:
                     value = self._resolve_custom(name, spec)
                 except Exception as e:
                     logger.warning(f'Substitution {{{{{name}}}}} failed: {e}')
                     return original
+                if not is_shell:
+                    logger.info(f'{name}: result: {value!r}')
                 return self._expand(value, _visited | {name})
 
             resolver = BUILTINS.get(name)
@@ -101,16 +105,18 @@ class SubstitutionMiddleware(Middleware):
                 return original
 
             try:
-                return resolver(fmt)
+                value = resolver(fmt)
             except Exception as e:
                 logger.warning(f'Substitution {{{{{name}}}}} failed: {e}')
                 return original
+            logger.info(f'{name}: result: {value!r}')
+            return value
 
         return PLACEHOLDER_RE.sub(replace, text)
 
     def _resolve_custom(self, name: str, spec) -> str:
         if isinstance(spec, dict) and 'shell' in spec:
-            return _run_shell(name, spec)
+            return run_shell(name, spec)
         if isinstance(spec, str):
             return spec
         return str(spec)

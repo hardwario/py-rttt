@@ -55,45 +55,55 @@ def save_trusted(trusted: dict[str, str]) -> None:
             f.write(f'{trusted[path]}  {path}\n')
 
 
-def ensure_shell_trust(config_path: str | None, substitutions: dict | None, trust_shells: bool) -> None:
-    """Prompt the user to approve shell substitutions and persist the decision.
+def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool) -> None:
+    """Prompt the user to approve shell substitutions from each config source.
 
-    Exits the process if the user declines. A silent no-op when no shell
-    substitutions are configured.
+    For every source file that declares `shell:` substitutions, check the
+    persisted trust hash. If unknown or changed, prompt (or auto-accept with
+    --trust-shells). Exits the process if the user declines any source.
+    Silent no-op when no source has shell substitutions.
     """
-    shell_entries = extract_shell_entries(substitutions)
-    if not shell_entries:
+    pending: list[tuple[str, dict[str, str], str]] = []
+    for path, data in sources:
+        shell_entries = extract_shell_entries((data or {}).get('substitutions'))
+        if not shell_entries:
+            continue
+        pending.append((path, shell_entries, compute_hash(shell_entries)))
+
+    if not pending:
         return
 
-    current_hash = compute_hash(shell_entries)
-    key = config_path or '<inline>'
-
     trusted = load_trusted()
-    if trusted.get(key) == current_hash:
+    needs_prompt = [(path, entries, h) for path, entries, h in pending if trusted.get(path) != h]
+    if not needs_prompt:
         return
 
     if trust_shells:
-        logger.info(f'Trusting shell substitutions via --trust-shells for {key}')
-        trusted[key] = current_hash
+        for path, _entries, h in needs_prompt:
+            logger.info(f'Trusting shell substitutions via --trust-shells for {path}')
+            trusted[path] = h
         save_trusted(trusted)
         return
 
     if not sys.stdin.isatty():
+        paths = ', '.join(p for p, _, _ in needs_prompt)
         click.secho(
-            f'Shell substitutions in {key} require confirmation. '
+            f'Shell substitutions in {paths} require confirmation. '
             f'Run interactively once or pass --trust-shells.',
             err=True, fg='red')
         sys.exit(1)
 
-    click.secho(f'\nConfig {key} defines shell substitutions:', fg='yellow')
-    for name, command in shell_entries.items():
-        click.echo(f'  {name}: {command}')
-    click.echo()
+    for path, entries, h in needs_prompt:
+        click.secho(f'\nConfig {path} defines shell substitutions:', fg='yellow')
+        for name, command in entries.items():
+            click.echo(f'  {name}: {command}')
+        click.echo()
 
-    if not click.confirm('Allow these commands to run when expanded?', default=False):
-        click.secho('Shell substitutions declined. Exiting.', err=True, fg='red')
-        sys.exit(1)
+        if not click.confirm('Allow these commands to run when expanded?', default=False):
+            click.secho('Shell substitutions declined. Exiting.', err=True, fg='red')
+            sys.exit(1)
 
-    trusted[key] = current_hash
+        trusted[path] = h
+
     save_trusted(trusted)
     click.secho(f'Trust saved to {TRUST_FILE}', fg='green')

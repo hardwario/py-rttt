@@ -2,13 +2,14 @@ import os
 import sys
 import click
 import time
-import yaml
 import pylink
+from dataclasses import dataclass, field
 from loguru import logger
 from rttt import __version__ as version
 from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, SubstitutionMiddleware, DemoConnector
 from rttt.console import Console
 from rttt.shell_trust import ensure_shell_trust
+from rttt.utils import load_configs
 
 DEFAULT_LOG_FILE = os.path.expanduser("~/.hardwario/rttt.log")
 DEFAULT_HISTORY_FILE = os.path.expanduser(f"~/.rttt_history")
@@ -16,17 +17,18 @@ DEFAULT_CONSOLE_FILE = os.path.expanduser(f"~/.rttt_console")
 DEFAULT_JLINK_SPEED_KHZ = 2000
 DEFAULT_MCP_LISTEN = '127.0.0.1:8090'
 
-_config: dict = {}
-_config_path: str | None = None
+
+CONFIG_SEARCH_PATHS = [
+    os.path.expanduser('~/.config/rttt.yaml'),
+    os.path.expanduser('~/.rttt.yaml'),
+    '.rttt.yaml',
+]
 
 
-def get_default_map():
-    for cf in ['.rttt.yaml', os.path.expanduser('~/.rttt.yaml'), os.path.expanduser('~/.config/rttt.yaml')]:
-        if os.path.exists(cf):
-            logger.debug('Loading config from: {}', cf)
-            with open(cf, 'r') as f:
-                return yaml.safe_load(f) or {}, os.path.abspath(cf)
-    return {}, None
+@dataclass
+class CliContext:
+    config: dict = field(default_factory=dict)
+    sources: list[tuple[str, dict]] = field(default_factory=list)
 
 
 class IntOrHexParamType(click.ParamType):
@@ -55,11 +57,12 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--mcp-listen', type=str, help='MCP server listen address [host:]port.', show_default=True, default=DEFAULT_MCP_LISTEN)
 @click.option('--substitutions/--no-substitutions', is_flag=True, default=True, show_default=True, help='Enable template substitutions in terminal input.')
 @click.option('--trust-shells', is_flag=True, default=False, help='Trust shell substitutions in config without interactive prompt (for CI/scripts).')
-def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, substitutions, trust_shells):
+@click.pass_obj
+def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, substitutions, trust_shells):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     if substitutions:
-        ensure_shell_trust(_config_path, _config.get('substitutions'), trust_shells)
+        ensure_shell_trust(app.sources, trust_shells)
 
     if not device:
         device = click.prompt('Device')
@@ -102,7 +105,7 @@ def cli(serial, device, speed, reset, address, terminal_buffer, logger_buffer, l
     connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address)
 
     if substitutions:
-        connector = SubstitutionMiddleware(connector, substitutions=_config.get('substitutions'))
+        connector = SubstitutionMiddleware(connector, substitutions=app.config.get('substitutions'))
 
     if mcp:
         connector = MCPMiddleware(connector, listen=mcp_listen)
@@ -132,13 +135,11 @@ def main():
 
     try:
         with logger.catch(reraise=True, exclude=KeyboardInterrupt):
-            default_map, config_path = get_default_map()
-            logger.debug('Loaded config: {} from {}', default_map, config_path)
-            _config.update(default_map)
-            global _config_path
-            _config_path = config_path
+            default_map, sources = load_configs(CONFIG_SEARCH_PATHS)
+            logger.debug('Loaded config: {} from {}', default_map, [p for p, _ in sources])
             cli_default_map = {k: v for k, v in default_map.items() if k != 'substitutions'}
-            cli(auto_envvar_prefix='RTTT', default_map=cli_default_map)
+            cli(auto_envvar_prefix='RTTT', default_map=cli_default_map,
+                obj=CliContext(config=default_map, sources=sources))
     except KeyboardInterrupt:
         pass
     except Exception as e:

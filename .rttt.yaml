@@ -4,7 +4,13 @@ console_file: "test.log"
 mcp: true
 substitutions:
   RTC_SET: "rtc set {{UTC_NOW}}"
-  GIT_SHA:
-    shell: "git rev-parse --short HEAD"
   LORA_KEY:
     shell: "openssl rand -hex 16 | tr a-z A-Z"
+  GIT_SHA:
+    shell: "git rev-parse --short HEAD"
+    multiline: true
+  CONFIG: |
+    app config interval-sample 60
+    app config interval-aggreg 300
+    app config interval-report 1800
+    {{RTC_SET}}

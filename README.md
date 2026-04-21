@@ -94,7 +94,15 @@ rttt --device NRF52840_xxAA --serial 123456789
 
 ## Configuration File
 
-RTTT supports configuration via a `.rttt.yaml` file, which can be placed in the **working directory**, the **home directory (`~/.rttt.yaml`)**, or the **user configuration directory (`~/.config/rttt.yaml`)**. The file is loaded from the first available location in this order—**working directory first, then home, then config**. If no configuration file is found, default settings are used.
+RTTT supports configuration via `.rttt.yaml` files. All existing files are loaded and deep-merged, so you can keep user-wide defaults in your home directory and override specific keys per project. The load order, from lowest to highest priority, is:
+
+1. `~/.config/rttt.yaml` — user defaults
+2. `~/.rttt.yaml` — user defaults (alternative location)
+3. `./.rttt.yaml` — project-specific overrides
+4. `RTTT_*` environment variables
+5. Command-line flags
+
+Nested mappings (like `substitutions:`) merge per-key — a project config can add new substitutions without losing the ones defined in your home config, or override specific ones by name.
 
 ### Example Configuration:
 
@@ -150,6 +158,21 @@ substitutions:
 Then typing `{{RTC_SET}}` in the terminal sends e.g. `rtc set 2026/04/20 10:08:00` to the device.
 
 Custom names take precedence over built-ins, so you can override `UTC_NOW` with a fixed value if needed.
+
+### Multi-Line Substitutions
+
+A substitution value may contain newlines. When the expanded text spans multiple lines, each line is sent as a separate input event to the device. This is useful for grouping a batch of commands under a single placeholder:
+
+```yaml
+substitutions:
+  CONFIG: |
+    app config interval-sample 60
+    app config interval-aggreg 300
+    app config interval-report 1800
+    {{RTC_SET}}
+```
+
+Typing `{{CONFIG}}` sends all five commands in order. Nested placeholders (like `{{RTC_SET}}` above) are expanded recursively before the fan-out.
 
 ### Shell Substitutions
 

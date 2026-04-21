@@ -1,5 +1,9 @@
 import asyncio
+import os
 import threading
+
+import yaml
+from loguru import logger
 
 
 def ensure_loop(name: str = 'RTTT') -> tuple[asyncio.AbstractEventLoop, threading.Thread | None]:
@@ -44,6 +48,44 @@ def parse_listen(listen: str, default_host: str = '127.0.0.1', default_port: int
         host, port_str = listen.rsplit(':', 1)
         return (host or default_host), int(port_str)
     return default_host, int(listen)
+
+
+def load_configs(paths: list[str]) -> tuple[dict, list[tuple[str, dict]]]:
+    """Load and deep-merge YAML configs from the given paths in order.
+
+    Missing files are skipped. Files must contain a YAML mapping at the top
+    level or they are ignored with a warning. Returns the merged dict plus a
+    list of `(absolute_path, source_dict)` in load order (low priority first).
+    """
+    merged: dict = {}
+    sources: list[tuple[str, dict]] = []
+    for cf in paths:
+        if not os.path.exists(cf):
+            continue
+        logger.debug('Loading config from: {}', cf)
+        with open(cf, 'r') as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            logger.warning(f'Config {cf} is not a mapping, skipping')
+            continue
+        sources.append((os.path.abspath(cf), data))
+        merged = deep_merge(merged, data)
+    return merged, sources
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    """Return a new dict: recursively merge override into base.
+
+    For keys present in both, nested dicts are merged per-key; other types
+    are replaced by the override value. Neither input is mutated.
+    """
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def truncate_path(path, max_length=100):

@@ -42,28 +42,53 @@ def test_save_and_load_roundtrip(trust_file):
 
 
 def test_ensure_shell_trust_noop_when_no_shell_entries(trust_file):
-    ensure_shell_trust('/some/path', {'STATIC': 'value'}, trust_shells=False)
+    sources = [('/some/path', {'substitutions': {'STATIC': 'value'}})]
+    ensure_shell_trust(sources, trust_shells=False)
     assert not trust_file.exists()
 
 
 def test_ensure_shell_trust_accepts_with_flag(trust_file):
-    subs = {'GIT': {'shell': 'echo 1'}}
-    ensure_shell_trust('/cfg.yaml', subs, trust_shells=True)
+    sources = [('/cfg.yaml', {'substitutions': {'GIT': {'shell': 'echo 1'}}})]
+    ensure_shell_trust(sources, trust_shells=True)
     assert load_trusted() == {'/cfg.yaml': compute_hash({'GIT': 'echo 1'})}
 
 
 def test_ensure_shell_trust_silent_on_known_hash(trust_file):
-    subs = {'GIT': {'shell': 'echo 1'}}
     save_trusted({'/cfg.yaml': compute_hash({'GIT': 'echo 1'})})
+    sources = [('/cfg.yaml', {'substitutions': {'GIT': {'shell': 'echo 1'}}})]
     # Should not raise / not prompt — returns normally.
-    ensure_shell_trust('/cfg.yaml', subs, trust_shells=False)
+    ensure_shell_trust(sources, trust_shells=False)
 
 
 def test_ensure_shell_trust_exits_when_hash_differs_and_noninteractive(trust_file, monkeypatch):
-    subs = {'GIT': {'shell': 'echo 2'}}  # different command → different hash
     save_trusted({'/cfg.yaml': compute_hash({'GIT': 'echo 1'})})
+    sources = [('/cfg.yaml', {'substitutions': {'GIT': {'shell': 'echo 2'}}})]
     monkeypatch.setattr('sys.stdin.isatty', lambda: False)
 
     with pytest.raises(SystemExit) as exc:
-        ensure_shell_trust('/cfg.yaml', subs, trust_shells=False)
+        ensure_shell_trust(sources, trust_shells=False)
     assert exc.value.code == 1
+
+
+def test_ensure_shell_trust_accepts_multiple_sources_with_flag(trust_file):
+    sources = [
+        ('/home.yaml', {'substitutions': {'GIT': {'shell': 'echo a'}}}),
+        ('/proj.yaml', {'substitutions': {'BUILD': {'shell': 'echo b'}}}),
+    ]
+    ensure_shell_trust(sources, trust_shells=True)
+    saved = load_trusted()
+    assert saved['/home.yaml'] == compute_hash({'GIT': 'echo a'})
+    assert saved['/proj.yaml'] == compute_hash({'BUILD': 'echo b'})
+
+
+def test_ensure_shell_trust_only_prompts_for_changed_source(trust_file, monkeypatch):
+    # home.yaml already trusted, proj.yaml is new → only proj.yaml should trigger prompt.
+    save_trusted({'/home.yaml': compute_hash({'GIT': 'echo a'})})
+    sources = [
+        ('/home.yaml', {'substitutions': {'GIT': {'shell': 'echo a'}}}),
+        ('/proj.yaml', {'substitutions': {'BUILD': {'shell': 'echo b'}}}),
+    ]
+    monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+
+    with pytest.raises(SystemExit):
+        ensure_shell_trust(sources, trust_shells=False)
