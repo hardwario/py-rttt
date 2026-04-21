@@ -28,7 +28,10 @@ class PyLinkRTTConnector(Connector):
         self._cache = {0: '', 1: ''}
 
         logger.info(f"Starting RTT{' control block found at 0x{:08X}'.format(self.block_address) if self.block_address else ''}")
-        self.jlink.rtt_start(self.block_address)
+        try:
+            self.jlink.rtt_start(self.block_address)
+        except pylink.errors.JLinkException as e:
+            raise Exception(f'J-Link: {e}') from e
 
         for _ in range(100):
             try:
@@ -38,6 +41,8 @@ class PyLinkRTTConnector(Connector):
                 break
             except pylink.errors.JLinkRTTException:
                 time.sleep(0.1)
+            except pylink.errors.JLinkException as e:
+                raise Exception(f'J-Link: {e}') from e
         else:
             raise Exception('Failed to find RTT block')
 
@@ -111,7 +116,10 @@ class PyLinkRTTConnector(Connector):
             data = bytearray(f'{event.data}\n', "utf-8")
             for i in range(0, len(data), self.terminal_buffer_down_size):
                 chunk = data[i:i + self.terminal_buffer_down_size]
-                self.jlink.rtt_write(self.terminal_buffer, list(chunk))
+                try:
+                    self.jlink.rtt_write(self.terminal_buffer, list(chunk))
+                except pylink.errors.JLinkException as e:
+                    raise Exception(f'J-Link: {e}') from e
         elif event.type == EventType.FLASH:
             self.flash(event.data.get('file'), event.data.get('addr', 0))
             return
@@ -169,6 +177,11 @@ class PyLinkRTTConnector(Connector):
                 self._emit(Event(EventType.FLASH, {
                     "status": "done", "file": file_path, "bytes_flashed": bytes_flashed
                 }))
+            except pylink.errors.JLinkException as e:
+                logger.error(f'J-Link: {e}')
+                self._emit(Event(EventType.FLASH, {
+                    "status": "error", "file": file_path, "error": f'J-Link: {e}'
+                }))
             except Exception as e:
                 logger.error(f'Flash error: {e}')
                 self._emit(Event(EventType.FLASH, {
@@ -197,7 +210,10 @@ class PyLinkRTTConnector(Connector):
                 if idx is None:
                     continue
                 try:
-                    data = self.jlink.rtt_read(idx, num_bytes)
+                    try:
+                        data = self.jlink.rtt_read(idx, num_bytes)
+                    except pylink.errors.JLinkException as e:
+                        raise Exception(f'J-Link: {e}') from e
                     if data:
                         lines = bytes(data).decode('utf-8', errors="backslashreplace")
                         if lines:

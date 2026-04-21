@@ -68,9 +68,12 @@ def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer,
         device = click.prompt('Device')
 
     jlink = pylink.JLink()
-    jlink.open(serial_no=serial)
-    jlink.set_speed(speed)
-    jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+    try:
+        jlink.open(serial_no=serial)
+        jlink.set_speed(speed)
+        jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+    except pylink.errors.JLinkException as e:
+        raise click.ClickException(f'J-Link: {e}') from e
 
     for label, getter in (
         ('dll version', lambda: jlink.version),
@@ -92,14 +95,17 @@ def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer,
             break
         except pylink.errors.JLinkException as e:
             if attempt < 2:
-                logger.warning(f'Connect attempt {attempt + 1} failed: {e}, retrying...')
+                logger.warning(f'J-Link: connect attempt {attempt + 1} failed: {e}, retrying...')
                 time.sleep(0.5)
             else:
-                raise
+                raise click.ClickException(f'J-Link: {e}') from e
 
     if reset:
-        jlink.reset()
-        jlink.go()
+        try:
+            jlink.reset()
+            jlink.go()
+        except pylink.errors.JLinkException as e:
+            raise click.ClickException(f'J-Link: {e}') from e
         time.sleep(1)
 
     connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address)
