@@ -114,12 +114,17 @@ class PyLinkRTTConnector(Connector):
             if not self.terminal_buffer_down_size:
                 raise Exception(f'Shell buffer DOWN {self.terminal_buffer} has zero size')
             data = bytearray(f'{event.data}\n', "utf-8")
-            for i in range(0, len(data), self.terminal_buffer_down_size):
-                chunk = data[i:i + self.terminal_buffer_down_size]
+            total = 0
+            while total < len(data):
+                chunk = data[total:total + self.terminal_buffer_down_size]
                 try:
-                    self.jlink.rtt_write(self.terminal_buffer, list(chunk))
+                    written = self.jlink.rtt_write(self.terminal_buffer, list(chunk))
                 except pylink.errors.JLinkException as e:
                     raise Exception(f'J-Link: {e}') from e
+                if written <= 0:
+                    time.sleep(0.005)
+                    continue
+                total += written
         elif event.type == EventType.FLASH:
             self.flash(event.data.get('file'), event.data.get('addr', 0))
             return
