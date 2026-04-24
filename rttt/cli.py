@@ -6,7 +6,7 @@ import pylink
 from dataclasses import dataclass, field
 from loguru import logger
 from rttt import __version__ as version
-from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, SubstitutionMiddleware, DemoConnector
+from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, MCPPortInUseError, SubstitutionMiddleware, DemoConnector
 from rttt.console import Console
 from rttt.shell_trust import ensure_shell_trust
 from rttt.utils import load_configs
@@ -114,7 +114,14 @@ def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer,
         connector = SubstitutionMiddleware(connector, substitutions=app.config.get('substitutions'))
 
     if mcp:
-        connector = MCPMiddleware(connector, listen=mcp_listen)
+        try:
+            connector = MCPMiddleware(connector, listen=mcp_listen)
+        except MCPPortInUseError as e:
+            raise click.ClickException(
+                f'MCP port {e.host}:{e.port} is already in use (another rttt instance?).\n'
+                f'       Use --mcp-listen {e.host}:{e.port + 1} to pick a different port, '
+                f'or --no-mcp to disable the MCP server.'
+            ) from e
 
     if console_file:
         text = f'Device: {device} J-Link sn: {serial}' if serial else f'Device: {device}'

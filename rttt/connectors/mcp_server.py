@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 from collections import deque
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
@@ -7,6 +8,15 @@ from rttt.connectors.base import Connector
 from rttt.connectors.middleware import AsyncMiddleware
 from rttt.event import Event, EventType
 from rttt.utils import parse_listen
+
+
+class MCPPortInUseError(Exception):
+    """Raised when the MCP server port is already bound by another process."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        super().__init__(f'MCP port {host}:{port} is already in use')
 
 
 class MCPMiddleware(AsyncMiddleware):
@@ -20,6 +30,7 @@ class MCPMiddleware(AsyncMiddleware):
     def __init__(self, connector: Connector, listen: str = "127.0.0.1:8090", max_lines: int = 5000, name: str = "Device Console"):
         super().__init__(connector)
         self.host, self.port = parse_listen(listen)
+        self._check_port_available(self.host, self.port)
         self.max_lines = max_lines
         self._terminal_lines = deque(maxlen=max_lines)
         self._log_lines = deque(maxlen=max_lines)
@@ -31,6 +42,22 @@ class MCPMiddleware(AsyncMiddleware):
         self._mcp = FastMCP(name, host=self.host, port=self.port, log_level="CRITICAL", stateless_http=True)
         self._register_tools()
         self._server_task = None
+
+    @staticmethod
+    def _check_port_available(host: str, port: int) -> None:
+        """Verify the TCP port can be bound. Raises MCPPortInUseError otherwise.
+
+        Running two MCP servers on the same port otherwise fails deep inside
+        uvicorn's background thread and has been observed to segfault the
+        whole process, so we fail fast with a clear error up front.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((host, port))
+        except OSError as e:
+            raise MCPPortInUseError(host, port) from e
+        finally:
+            sock.close()
 
     def open(self):
         super().open()
