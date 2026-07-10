@@ -80,7 +80,11 @@ class MCPMiddleware(AsyncMiddleware):
             direction = "in" if event.type == EventType.IN else "out"
             self._terminal_lines.append({"direction": direction, "text": event.data})
             self._terminal_cursor += 1
-            self._terminal_event.set()
+            # Only device output counts as activity — the echo of a sent
+            # command must not reset send_command's silence window, or the
+            # wait collapses to ~0.3 s regardless of the requested timeout.
+            if event.type == EventType.OUT:
+                self._terminal_event.set()
         elif event.type == EventType.LOG:
             self._log_lines.append(event.data)
             self._log_cursor += 1
@@ -130,7 +134,14 @@ class MCPMiddleware(AsyncMiddleware):
                 new_count = middleware._terminal_cursor - terminal_cursor
                 all_lines = list(middleware._terminal_lines)
                 output = all_lines[-new_count:] if new_count > 0 else []
-                # Filter out the echo of the sent command
+                # Drop everything up to and including the echo of this
+                # command — late output of a previous command may have
+                # landed in the buffer just before this one was sent.
+                for i in range(len(output) - 1, -1, -1):
+                    if output[i]["direction"] == "in" and output[i]["text"] == command:
+                        output = output[i + 1:]
+                        break
+                # Filter out echoes of any commands
                 output = [line for line in output if line["direction"] != "in"]
                 return {
                     "status": "ok",
