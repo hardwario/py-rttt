@@ -70,6 +70,9 @@ def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer,
     jlink = pylink.JLink()
     try:
         jlink.open(serial_no=serial)
+        # Suppress DLL GUI dialogs (flash progress window, firmware update
+        # prompts) — they have no place in a TUI/headless session.
+        jlink.disable_dialog_boxes()
         jlink.set_speed(speed)
         jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
     except pylink.errors.JLinkException as e:

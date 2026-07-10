@@ -28,23 +28,73 @@ class PyLinkRTTConnector(Connector):
         self._cache = {0: '', 1: ''}
 
         logger.info(f"Starting RTT{' control block found at 0x{:08X}'.format(self.block_address) if self.block_address else ''}")
-        try:
-            self.jlink.rtt_start(self.block_address)
-        except pylink.errors.JLinkException as e:
-            raise Exception(f'J-Link: {e}') from e
 
-        for _ in range(100):
+        # Right after flash + reset the search may hit a stale control block
+        # left in RAM with zeroed descriptors (or at a different address than
+        # the new firmware uses), so restart the search until the terminal
+        # buffer reports a non-zero size.
+        deadline = time.monotonic() + 15.0
+        logger_deadline = None
+        while True:
             try:
-                num_up = self.jlink.rtt_get_num_up_buffers()
-                num_down = self.jlink.rtt_get_num_down_buffers()
-                logger.info(f'RTT started, {num_up} up bufs, {num_down} down bufs.')
-                break
-            except pylink.errors.JLinkRTTException:
-                time.sleep(0.1)
+                self.jlink.rtt_start(self.block_address)
             except pylink.errors.JLinkException as e:
                 raise Exception(f'J-Link: {e}') from e
-        else:
-            raise Exception('Failed to find RTT block')
+
+            num_up = None
+            while time.monotonic() < deadline:
+                try:
+                    num_up = self.jlink.rtt_get_num_up_buffers()
+                    num_down = self.jlink.rtt_get_num_down_buffers()
+                    break
+                except pylink.errors.JLinkRTTException:
+                    time.sleep(0.1)
+                except pylink.errors.JLinkException as e:
+                    raise Exception(f'J-Link: {e}') from e
+
+            attached = False
+            while num_up is not None and num_up > self.terminal_buffer:
+                # The firmware registers RTT buffers one by one during boot
+                # (terminal first, logger later), so wait until both report
+                # a non-zero size — attaching in between leaves the logger
+                # buffer size cached as 0 and logs dead for the whole session.
+                terminal_ready = self.jlink.rtt_get_buf_descriptor(self.terminal_buffer, 1).SizeOfBuffer > 0
+                logger_ready = num_up <= self.logger_buffer
+                if not logger_ready:
+                    logger_ready = self.jlink.rtt_get_buf_descriptor(self.logger_buffer, 1).SizeOfBuffer > 0
+                if terminal_ready and logger_ready:
+                    attached = True
+                    break
+                if not terminal_ready:
+                    # stale/zeroed control block — restart the search below
+                    break
+                # Terminal is up, only the logger buffer is missing: give the
+                # firmware a short window to register it, then continue
+                # without logs — some firmwares have no RTT log backend and
+                # their logger buffer size stays 0 forever. Descriptors are
+                # read live, no need to restart the search.
+                if logger_deadline is None:
+                    logger_deadline = time.monotonic() + 3.0
+                if time.monotonic() >= logger_deadline:
+                    logger.warning('Logger buffer not initialized, continuing without logs')
+                    attached = True
+                    break
+                time.sleep(0.1)
+
+            if attached:
+                logger.info(f'RTT started, {num_up} up bufs, {num_down} down bufs.')
+                break
+
+            try:
+                self.jlink.rtt_stop()
+            except pylink.errors.JLinkException:
+                pass
+
+            if time.monotonic() >= deadline:
+                raise Exception('Failed to find RTT block')
+
+            logger.info('RTT control block not initialized yet, retrying search...')
+            time.sleep(0.2)
 
         if num_up == 0:
             raise Exception('No RTT up buffers found')
@@ -176,11 +226,17 @@ class PyLinkRTTConnector(Connector):
 
             try:
                 logger.info(f'Flash: flashing {file_path} at 0x{addr:08X}')
-                bytes_flashed = self.jlink.flash_file(file_path, addr, on_progress=on_progress)
-                logger.info(f'Flash: complete, {bytes_flashed} bytes')
+                # Reset and halt before programming (same sequence as JLinkExe
+                # and nrfjprog). Without it the flash loader RAMCode fails to
+                # start on a running nRF91 (TF-M + modem) and the DLL silently
+                # programs nothing while still returning success.
+                self.jlink.reset(ms=10, halt=True)
+                # flash_file return value has no significance (see pylink docs)
+                self.jlink.flash_file(file_path, addr, on_progress=on_progress)
+                logger.info('Flash: complete')
                 self.jlink.reset(ms=10, halt=False)
                 self._emit(Event(EventType.FLASH, {
-                    "status": "done", "file": file_path, "bytes_flashed": bytes_flashed
+                    "status": "done", "file": file_path
                 }))
             except pylink.errors.JLinkException as e:
                 logger.error(f'J-Link: {e}')

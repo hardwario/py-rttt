@@ -85,7 +85,9 @@ class MCPMiddleware(AsyncMiddleware):
             self._log_lines.append(event.data)
             self._log_cursor += 1
         elif event.type == EventType.FLASH:
-            self._flash_events.append(event.data)
+            # skip per-sector progress events — hundreds of them per flash
+            if event.data.get("status") != "progress":
+                self._flash_events.append(event.data)
             if event.data.get("status") in ("done", "error") and self._flash_done is not None:
                 self._flash_done.set()
 
@@ -232,8 +234,6 @@ class MCPMiddleware(AsyncMiddleware):
                     "file": file_path,
                     "events": middleware._flash_events,
                 }
-                if "bytes_flashed" in final:
-                    result["bytes_flashed"] = final["bytes_flashed"]
                 if "error" in final:
                     result["error"] = final["error"]
                 return result
@@ -242,3 +242,29 @@ class MCPMiddleware(AsyncMiddleware):
                 return {"status": "error", "error": str(e)}
             finally:
                 middleware._flash_done = None
+
+        @self._mcp.tool()
+        async def reconnect() -> dict:
+            """Restart the RTT connection to the device.
+
+            Use when the RTT session appears stuck — e.g. commands fail with
+            "Shell buffer DOWN 0 has zero size", no output arrives anymore,
+            or the device was reset/reflashed outside this tool. Does not
+            reset the device, only re-attaches to its RTT control block.
+            """
+            conn = middleware.connector
+            while hasattr(conn, 'connector'):
+                conn = conn.connector
+
+            def _do():
+                conn.stop()
+                conn.start()
+
+            try:
+                loop = asyncio.get_event_loop()
+                await asyncio.wait_for(loop.run_in_executor(None, _do), timeout=30.0)
+                return {"status": "ok"}
+            except asyncio.TimeoutError:
+                return {"status": "error", "error": "Reconnect timed out"}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
