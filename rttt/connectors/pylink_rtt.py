@@ -222,7 +222,11 @@ class PyLinkRTTConnector(Connector):
             if was_running:
                 self.stop()
 
+            progress_calls = 0
+
             def on_progress(action, progress_string, percentage):
+                nonlocal progress_calls
+                progress_calls += 1
                 if isinstance(action, bytes):
                     action = action.decode('utf-8', errors='replace')
                 if isinstance(progress_string, bytes):
@@ -244,7 +248,15 @@ class PyLinkRTTConnector(Connector):
                 self.jlink.reset(ms=10, halt=True)
                 # flash_file return value has no significance (see pylink docs)
                 self.jlink.flash_file(file_path, addr, on_progress=on_progress)
-                logger.info('Flash: complete')
+                # A real flash download reports hundreds of progress callbacks
+                # (Compare/Erase/Program/Verify). Zero callbacks means the DLL
+                # flash loader never ran and the device was NOT programmed,
+                # even though flash_file returned success.
+                if progress_calls == 0:
+                    raise Exception(
+                        'Flash loader did not run (no progress reported) — the device '
+                        'was most likely not programmed. Reset the device and try again.')
+                logger.info(f'Flash: complete ({progress_calls} progress callbacks)')
                 # Drop the DLL flash cache — after a flash download it serves
                 # memory reads of flash ranges from cache, which can mask a
                 # failed program operation with phantom content.
@@ -258,11 +270,13 @@ class PyLinkRTTConnector(Connector):
                 }))
             except pylink.errors.JLinkException as e:
                 logger.error(f'J-Link: {e}')
+                self._try_resume()
                 self._emit(Event(EventType.FLASH, {
                     "status": "error", "file": file_path, "error": f'J-Link: {e}'
                 }))
             except Exception as e:
                 logger.error(f'Flash error: {e}')
+                self._try_resume()
                 self._emit(Event(EventType.FLASH, {
                     "status": "error", "file": file_path, "error": str(e)
                 }))
@@ -278,6 +292,13 @@ class PyLinkRTTConnector(Connector):
                     }))
         finally:
             self._flash_lock.release()
+
+    def _try_resume(self):
+        """Best-effort reset+go so a failure does not leave the target halted."""
+        try:
+            self.jlink.reset(ms=10, halt=False)
+        except pylink.errors.JLinkException as e:
+            logger.warning(f'Resume after failure failed: {e}')
 
     def _read_task(self):
         while self.is_running:
