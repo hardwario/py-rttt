@@ -134,6 +134,17 @@ class PyLinkRTTConnector(Connector):
         self.thread = threading.Thread(target=self._read_task, daemon=True)
         self.thread.start()
 
+    def reset(self, halt=False):
+        """Reset the target. Restarts the RTT session unless halting."""
+        was_running = self.is_running
+        if was_running:
+            self.stop()
+        try:
+            self.jlink.reset(ms=10, halt=halt)
+        finally:
+            if was_running and not halt:
+                self.start()
+
     def stop(self):
         """Stop the read thread and RTT."""
         if not self.is_running:
@@ -234,6 +245,13 @@ class PyLinkRTTConnector(Connector):
                 # flash_file return value has no significance (see pylink docs)
                 self.jlink.flash_file(file_path, addr, on_progress=on_progress)
                 logger.info('Flash: complete')
+                # Drop the DLL flash cache — after a flash download it serves
+                # memory reads of flash ranges from cache, which can mask a
+                # failed program operation with phantom content.
+                try:
+                    self.jlink.exec_command('InvalidateCache')
+                except pylink.errors.JLinkException as e:
+                    logger.warning(f'InvalidateCache failed: {e}')
                 self.jlink.reset(ms=10, halt=False)
                 self._emit(Event(EventType.FLASH, {
                     "status": "done", "file": file_path

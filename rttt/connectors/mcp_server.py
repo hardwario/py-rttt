@@ -10,6 +10,17 @@ from rttt.event import Event, EventType
 from rttt.utils import parse_listen
 
 
+def _hexdump(addr: int, data: bytes) -> list:
+    """Format bytes as classic hexdump lines with address and ASCII column."""
+    lines = []
+    for off in range(0, len(data), 16):
+        chunk = data[off:off + 16]
+        hexpart = ' '.join(f'{b:02x}' for b in chunk)
+        asciipart = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+        lines.append(f'0x{addr + off:08X}: {hexpart:<47} |{asciipart}|')
+    return lines
+
+
 class MCPPortInUseError(Exception):
     """Raised when the MCP server port is already bound by another process."""
 
@@ -74,6 +85,30 @@ class MCPMiddleware(AsyncMiddleware):
             except Exception:
                 pass
         super().close()
+
+    def _leaf(self):
+        """Descend the middleware chain to the leaf (J-Link) connector."""
+        conn = self.connector
+        while hasattr(conn, 'connector'):
+            conn = conn.connector
+        return conn
+
+    async def _run_target_op(self, func, timeout: float = 10.0) -> dict:
+        """Run a blocking J-Link operation in an executor with a timeout.
+
+        Returns {"status": "ok", **result} or {"status": "error", ...}.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(loop.run_in_executor(None, func), timeout=timeout)
+            out = {"status": "ok"}
+            if isinstance(result, dict):
+                out.update(result)
+            return out
+        except asyncio.TimeoutError:
+            return {"status": "error", "error": "Operation timed out"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
     async def _process(self, event: Event):
         if event.type in (EventType.OUT, EventType.IN):
@@ -263,19 +298,242 @@ class MCPMiddleware(AsyncMiddleware):
             or the device was reset/reflashed outside this tool. Does not
             reset the device, only re-attaches to its RTT control block.
             """
-            conn = middleware.connector
-            while hasattr(conn, 'connector'):
-                conn = conn.connector
+            conn = middleware._leaf()
 
             def _do():
                 conn.stop()
                 conn.start()
 
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def reset(halt: bool = False) -> dict:
+            """Reset the target device.
+
+            With halt=False the firmware restarts and the RTT session is
+            re-attached automatically. With halt=True the CPU stays halted
+            at the reset vector and RTT is stopped — use `go` followed by
+            `reconnect` to resume.
+            """
+            conn = middleware._leaf()
+            result = await middleware._run_target_op(lambda: conn.reset(halt=halt), timeout=30.0)
+            if result["status"] == "ok":
+                result["halted"] = halt
+            return result
+
+        @self._mcp.tool()
+        async def halt() -> dict:
+            """Halt the target CPU. RTT keeps working (RAM stays accessible),
+            but the firmware stops running until `go` or `reset`."""
+            conn = middleware._leaf()
+
+            def _do():
+                conn.jlink.halt()
+                return {"halted": conn.jlink.halted()}
+
+            return await middleware._run_target_op(_do)
+
+        @self._mcp.tool()
+        async def go() -> dict:
+            """Resume the halted target CPU."""
+            conn = middleware._leaf()
+
+            def _do():
+                conn.jlink.restart()
+                return {"halted": conn.jlink.halted()}
+
+            return await middleware._run_target_op(_do)
+
+        @self._mcp.tool()
+        async def target_status() -> dict:
+            """Get target CPU state: halted flag and core identification."""
+            conn = middleware._leaf()
+
+            def _do():
+                return {
+                    "halted": conn.jlink.halted(),
+                    "core_id": f'0x{conn.jlink.core_id():08X}',
+                    "device": conn.jlink.core_name(),
+                }
+
+            return await middleware._run_target_op(_do)
+
+        @self._mcp.tool()
+        async def read_memory(address: str, length: int = 64, width: int = 8) -> dict:
+            """Read target memory (RAM, flash, peripherals) via J-Link.
+
+            Works while the firmware is running. Flash is memory-mapped, so
+            this also serves as flash read.
+
+            Args:
+                address: Start address, e.g. "0x10000" or decimal.
+                length: Number of bytes to read (max 65536).
+                width: Access width in bits: 8, 16 or 32 (use 32 for
+                    peripheral registers that ignore byte accesses).
+            """
+            conn = middleware._leaf()
             try:
-                loop = asyncio.get_event_loop()
-                await asyncio.wait_for(loop.run_in_executor(None, _do), timeout=30.0)
-                return {"status": "ok"}
-            except asyncio.TimeoutError:
-                return {"status": "error", "error": "Reconnect timed out"}
-            except Exception as e:
+                addr = int(address, 0)
+            except ValueError:
+                return {"status": "error", "error": f"Invalid address: {address}"}
+            if width not in (8, 16, 32):
+                return {"status": "error", "error": "width must be 8, 16 or 32"}
+            length = min(int(length), 65536)
+            unit = width // 8
+            num_units = (length + unit - 1) // unit
+
+            def _do():
+                units = conn.jlink.memory_read(addr, num_units, nbits=width)
+                data = b''.join(int(u).to_bytes(unit, 'little') for u in units)[:length]
+                return {
+                    "address": f'0x{addr:08X}',
+                    "length": len(data),
+                    "hex": data.hex(),
+                    "dump": _hexdump(addr, data),
+                }
+
+            return await middleware._run_target_op(_do)
+
+        @self._mcp.tool()
+        async def write_memory(address: str, data: str, width: int = 8) -> dict:
+            """Write target memory (RAM or peripheral registers) via J-Link.
+
+            Does NOT program flash — use `write_flash` for that.
+
+            Args:
+                address: Start address, e.g. "0x20000000" or decimal.
+                data: Hex byte string, e.g. "deadbeef" (little-endian units).
+                width: Access width in bits: 8, 16 or 32.
+            """
+            conn = middleware._leaf()
+            try:
+                addr = int(address, 0)
+                raw = bytes.fromhex(data.replace(' ', ''))
+            except ValueError as e:
                 return {"status": "error", "error": str(e)}
+            if width not in (8, 16, 32):
+                return {"status": "error", "error": "width must be 8, 16 or 32"}
+            unit = width // 8
+            if len(raw) % unit:
+                return {"status": "error", "error": f"data length must be a multiple of {unit} bytes"}
+            units = [int.from_bytes(raw[i:i + unit], 'little') for i in range(0, len(raw), unit)]
+
+            def _do():
+                written = conn.jlink.memory_write(addr, units, nbits=width)
+                return {"address": f'0x{addr:08X}', "units_written": written}
+
+            return await middleware._run_target_op(_do)
+
+        @self._mcp.tool()
+        async def write_flash(address: str, data: str) -> dict:
+            """Program internal flash at the given address via J-Link.
+
+            Resets and halts the target, programs (with erase) the given
+            bytes, then resets and re-attaches RTT. The firmware reboots.
+
+            Args:
+                address: Flash address, e.g. "0x10000".
+                data: Hex byte string to program, e.g. "96f3b83d...".
+            """
+            conn = middleware._leaf()
+            try:
+                addr = int(address, 0)
+                raw = bytes.fromhex(data.replace(' ', ''))
+            except ValueError as e:
+                return {"status": "error", "error": str(e)}
+            if not raw:
+                return {"status": "error", "error": "no data"}
+
+            def _do():
+                was_running = conn.is_running
+                if was_running:
+                    conn.stop()
+                try:
+                    conn.jlink.reset(ms=10, halt=True)
+                    conn.jlink.flash_write(addr, list(raw), nbits=8)
+                    try:
+                        conn.jlink.exec_command('InvalidateCache')
+                    except Exception:
+                        pass
+                    conn.jlink.reset(ms=10, halt=False)
+                finally:
+                    if was_running:
+                        conn.start()
+                return {"address": f'0x{addr:08X}', "bytes": len(raw)}
+
+            return await middleware._run_target_op(_do, timeout=60.0)
+
+        @self._mcp.tool()
+        async def read_registers() -> dict:
+            """Read core CPU registers (R0-R15, PSR, MSP, PSP, ...).
+
+            The target must be halted (use `halt` first), register access
+            on a running Cortex-M is not possible.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                if not conn.jlink.halted():
+                    raise RuntimeError('Target is running — call `halt` first')
+                indices = conn.jlink.register_list()
+                values = conn.jlink.register_read_multiple(indices)
+                return {
+                    "registers": {
+                        conn.jlink.register_name(idx): f'0x{val:08X}'
+                        for idx, val in zip(indices, values)
+                    }
+                }
+
+            return await middleware._run_target_op(_do)
+
+        @self._mcp.tool()
+        async def memory_zones() -> dict:
+            """List memory zones the J-Link supports for the current target."""
+            conn = middleware._leaf()
+
+            def _do():
+                zones = []
+                for z in conn.jlink.memory_zones():
+                    name = z.sName.decode() if isinstance(z.sName, bytes) else str(z.sName)
+                    desc = z.sDesc.decode() if isinstance(z.sDesc, bytes) else str(z.sDesc)
+                    zones.append({"name": name, "description": desc,
+                                  "virtual_address": f'0x{z.VirtAddr:08X}'})
+                return {"zones": zones}
+
+            return await middleware._run_target_op(_do)
+
+        @self._mcp.prompt()
+        def debug_device() -> str:
+            """How to debug the connected embedded device with this server's tools."""
+            return (
+                "You are connected to an embedded device (Zephyr/nRF style) over a\n"
+                "J-Link RTT session. Available workflows:\n"
+                "\n"
+                "Inspect what the firmware is doing:\n"
+                "- `read_log` shows buffered device logs; filter with `pattern`,\n"
+                "  or pass `after_cursor` from a `send_command` result to see only\n"
+                "  logs caused by that command.\n"
+                "- `send_command` talks to the device shell (try `help`, `kernel uptime`,\n"
+                "  `info show`). Increase `timeout` for slow commands. Output belongs to\n"
+                "  the sent command only; logs are separate (see `read_log`).\n"
+                "\n"
+                "Flash new firmware:\n"
+                "- `flash` with an absolute path to .hex/.bin/.elf. The device reboots\n"
+                "  and RTT re-attaches automatically. Verify with `send_command`\n"
+                "  (e.g. `info show`) or by watching `read_log` for the boot banner.\n"
+                "\n"
+                "Low-level debugging (use sparingly, prefer shell/logs):\n"
+                "- `target_status` shows whether the CPU runs; `halt` stops it,\n"
+                "  `go` resumes, `reset` reboots (halt=True stays at reset vector).\n"
+                "- `read_registers` requires a halted CPU (call `halt` first);\n"
+                "  PC/LR/SP tell you where the firmware is stuck.\n"
+                "- `read_memory`/`write_memory` access RAM and peripherals live;\n"
+                "  flash is memory-mapped so `read_memory` also reads flash.\n"
+                "- `write_flash` programs internal flash bytes (device reboots).\n"
+                "\n"
+                "Troubleshooting:\n"
+                "- Commands fail or no output arrives: call `reconnect` (re-attaches\n"
+                "  RTT without resetting the device), then retry.\n"
+                "- Still dead: `reset`, wait a few seconds, retry `send_command`.\n"
+                "- Device shell echoes garbage right after boot: wait 2-3 s and retry.\n"
+            )
