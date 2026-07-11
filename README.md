@@ -74,6 +74,8 @@ Options:
                              [default: substitutions]
   --trust-shells             Trust shell substitutions in config without
                              interactive prompt (for CI/scripts).
+  --headless                 Run without the interactive console, MCP server
+                             only (requires --mcp).
   --help                     Show this message and exit.
 ```
 
@@ -239,6 +241,45 @@ Add to your `.mcp.json`:
 | `read_log(lines, after_cursor, pattern)` | Read log output from the device ring buffer, with optional regex filter |
 | `status()` | Get session statistics (line counts, buffer usage, cursors) |
 | `flash(file_path, addr)` | Flash a firmware file (.hex, .bin, .elf, .srec) to the target device |
+| `reconnect()` | Re-attach a stuck RTT session without resetting the device |
+| `reset(halt)` | Reset the target; RTT re-attaches automatically (unless halting) |
+| `halt()` / `go()` | Stop / resume the target CPU |
+| `target_status()` | CPU halted flag and core identification |
+| `read_memory(address, length, width)` | Hexdump of RAM, peripherals or memory-mapped flash |
+| `write_memory(address, data, width)` | Write RAM or peripheral registers |
+| `write_flash(address, data)` | Program internal flash bytes (reset+halt, program, reboot) |
+| `read_registers()` | Core CPU registers (requires a halted target) |
+| `memory_zones()` | Memory zones supported by the J-Link for the target |
+
+The server also exposes a `debug_device` MCP prompt describing typical
+debugging workflows and RTT troubleshooting for agent clients.
+
+### Headless Mode
+
+For CI boxes, remote debug servers or fully agent-driven sessions, run the
+MCP server without the interactive console:
+
+```bash
+rttt --device NRF9151_XXCA --mcp --headless
+```
+
+### Uploading Firmware from a Remote Client
+
+The `flash` tool resolves paths on the machine `rttt` runs on. When the MCP
+client runs elsewhere, upload the firmware first via the HTTP endpoint served
+on the same port:
+
+```bash
+curl --data-binary @fw.hex 'http://<host>:8090/upload?filename=fw.hex'
+# → {"status": "ok", "path": "/tmp/rttt-uploads-8090/fw.hex", "size": 123456}
+```
+
+Then pass the returned `path` to the `flash` tool. Allowed extensions are
+`.hex`, `.bin`, `.elf` and `.srec`; the body is limited to 64 MiB.
+
+> **Note:** the MCP server and the upload endpoint have no authentication.
+> The default bind is `127.0.0.1`; think twice before exposing them with
+> `--mcp-listen 0.0.0.0:8090` outside a trusted network.
 
 ## License
 

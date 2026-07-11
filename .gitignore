@@ -11,3 +11,5 @@ develop-eggs/
 *.bin
 *.hex
 zzz/
+*.log
+.claude/
