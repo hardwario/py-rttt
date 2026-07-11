@@ -51,6 +51,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._terminal_event = asyncio.Event()
         self._flash_events = []
         self._flash_done = None
+        self._flash_activity = None
         self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
         self._mcp = FastMCP(name, host=self.host, port=self.port, log_level="CRITICAL", stateless_http=True)
         self._register_tools()
@@ -184,6 +185,8 @@ class MCPMiddleware(AsyncMiddleware):
             # skip per-sector progress events — hundreds of them per flash
             if event.data.get("status") != "progress":
                 self._flash_events.append(event.data)
+            if self._flash_activity is not None:
+                self._flash_activity.set()
             if event.data.get("status") in ("done", "error") and self._flash_done is not None:
                 self._flash_done.set()
 
@@ -323,6 +326,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             middleware._flash_events = []
             middleware._flash_done = asyncio.Event()
+            middleware._flash_activity = asyncio.Event()
 
             try:
                 loop = asyncio.get_event_loop()
@@ -332,10 +336,17 @@ class MCPMiddleware(AsyncMiddleware):
                     Event(EventType.FLASH, {"file": file_path, "addr": addr})
                 )
 
-                try:
-                    await asyncio.wait_for(middleware._flash_done.wait(), timeout=120.0)
-                except asyncio.TimeoutError:
-                    return {"status": "error", "error": "Flash operation timed out"}
+                # Wait for completion with a stall detector instead of a fixed
+                # overall limit: any flash event (including per-sector progress)
+                # counts as activity, so big images over a slow SWD link are
+                # fine while a genuinely stuck operation still errors out.
+                while not middleware._flash_done.is_set():
+                    middleware._flash_activity.clear()
+                    try:
+                        await asyncio.wait_for(middleware._flash_activity.wait(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        return {"status": "error",
+                                "error": "Flash operation stalled (no progress for 60 s)"}
 
                 final = middleware._flash_events[-1] if middleware._flash_events else {}
                 result = {
@@ -351,6 +362,7 @@ class MCPMiddleware(AsyncMiddleware):
                 return {"status": "error", "error": str(e)}
             finally:
                 middleware._flash_done = None
+                middleware._flash_activity = None
 
         @self._mcp.tool()
         async def reconnect() -> dict:
