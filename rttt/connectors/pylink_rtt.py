@@ -302,9 +302,12 @@ class PyLinkRTTConnector(Connector):
 
     def _read_task(self):
         while self.is_running:
+            # Read up to the full buffer size per cycle — with a smaller chunk
+            # a burst (e.g. boot logs) fills the target-side ring buffer faster
+            # than we drain it and the firmware drops log lines.
             channels = [
-                (self.terminal_buffer, min(1000, self.terminal_buffer_up_size), EventType.OUT),
-                (self.logger_buffer, min(1000, self.log_up_size), EventType.LOG)
+                (self.terminal_buffer, self.terminal_buffer_up_size, EventType.OUT),
+                (self.logger_buffer, self.log_up_size, EventType.LOG)
             ]
             for idx, num_bytes, event_type in channels:
                 if idx is None:
