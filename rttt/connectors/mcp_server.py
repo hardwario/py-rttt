@@ -1,6 +1,7 @@
 import asyncio
 import os
 import socket
+import tempfile
 from collections import deque
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
@@ -50,8 +51,10 @@ class MCPMiddleware(AsyncMiddleware):
         self._terminal_event = asyncio.Event()
         self._flash_events = []
         self._flash_done = None
+        self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
         self._mcp = FastMCP(name, host=self.host, port=self.port, log_level="CRITICAL", stateless_http=True)
         self._register_tools()
+        self._register_routes()
         self._server_task = None
 
     @staticmethod
@@ -85,6 +88,43 @@ class MCPMiddleware(AsyncMiddleware):
             except Exception:
                 pass
         super().close()
+
+    def _register_routes(self):
+        """Register plain HTTP routes served alongside the /mcp endpoint."""
+        middleware = self
+
+        @self._mcp.custom_route('/upload', methods=['POST', 'PUT'])
+        async def upload(request):
+            """Receive a firmware file as the raw request body and store it
+            in a temp directory, returning the server-side path for `flash`.
+
+            Usage: curl --data-binary @fw.hex 'http://host:port/upload?filename=fw.hex'
+            """
+            from starlette.responses import JSONResponse
+
+            filename = os.path.basename(request.query_params.get('filename', ''))
+            if not filename:
+                return JSONResponse(
+                    {"status": "error", "error": "missing ?filename= query parameter"},
+                    status_code=400)
+            if os.path.splitext(filename)[1].lower() not in ('.hex', '.bin', '.elf', '.srec'):
+                return JSONResponse(
+                    {"status": "error", "error": "filename must end with .hex, .bin, .elf or .srec"},
+                    status_code=400)
+
+            data = await request.body()
+            if not data:
+                return JSONResponse({"status": "error", "error": "empty body"}, status_code=400)
+            if len(data) > 64 * 1024 * 1024:
+                return JSONResponse({"status": "error", "error": "file too large (max 64 MiB)"},
+                                    status_code=413)
+
+            os.makedirs(middleware._upload_dir, exist_ok=True)
+            path = os.path.join(middleware._upload_dir, filename)
+            with open(path, 'wb') as f:
+                f.write(data)
+            logger.info(f'Upload: stored {len(data)} bytes at {path}')
+            return JSONResponse({"status": "ok", "path": path, "size": len(data)})
 
     def _leaf(self):
         """Descend the middleware chain to the leaf (J-Link) connector."""
@@ -250,6 +290,12 @@ class MCPMiddleware(AsyncMiddleware):
             - Zephyr/west: build/merged.hex (or build/<app>/merged.hex)
             - nRF Connect SDK: build/merged.hex
             - Generic: build/firmware.hex, build/output.bin
+
+            The path is resolved on the machine this server runs on. If the
+            firmware file is on a different machine, upload it first via the
+            HTTP endpoint served on the same port:
+            `curl --data-binary @fw.hex 'http://<host>:<port>/upload?filename=fw.hex'`
+            — the JSON response contains the server-side `path` to pass here.
 
             Args:
                 file_path: Absolute path to the firmware file.
@@ -521,6 +567,10 @@ class MCPMiddleware(AsyncMiddleware):
                 "- `flash` with an absolute path to .hex/.bin/.elf. The device reboots\n"
                 "  and RTT re-attaches automatically. Verify with `send_command`\n"
                 "  (e.g. `info show`) or by watching `read_log` for the boot banner.\n"
+                "- The path must exist on the machine running this server. If your\n"
+                "  firmware is local to you, upload it first (same host and port):\n"
+                "  curl --data-binary @fw.hex 'http://HOST:PORT/upload?filename=fw.hex'\n"
+                "  and pass the returned `path` to `flash`.\n"
                 "\n"
                 "Low-level debugging (use sparingly, prefer shell/logs):\n"
                 "- `target_status` shows whether the CPU runs; `halt` stops it,\n"
