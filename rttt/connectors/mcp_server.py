@@ -136,11 +136,28 @@ class MCPMiddleware(AsyncMiddleware):
     async def _run_target_op(self, func, timeout: float = 10.0) -> dict:
         """Run a blocking J-Link operation in an executor with a timeout.
 
-        Returns {"status": "ok", **result} or {"status": "error", ...}.
+        Target-state operations are serialized through the connector's
+        _op_lock (shared with flash), so e.g. a reset cannot interleave
+        with a running flash. Returns {"status": "ok", **result} or
+        {"status": "error", ...}.
         """
+        lock = getattr(self._leaf(), '_op_lock', None)
+        if lock is not None and not lock.acquire(blocking=False):
+            return {"status": "error",
+                    "error": "Another target operation is in progress, retry in a moment"}
+
+        def wrapper():
+            # Release inside the executor so the lock is held for as long as
+            # the operation actually runs, even past an asyncio timeout.
+            try:
+                return func()
+            finally:
+                if lock is not None:
+                    lock.release()
+
         try:
             loop = asyncio.get_event_loop()
-            result = await asyncio.wait_for(loop.run_in_executor(None, func), timeout=timeout)
+            result = await asyncio.wait_for(loop.run_in_executor(None, wrapper), timeout=timeout)
             out = {"status": "ok"}
             if isinstance(result, dict):
                 out.update(result)

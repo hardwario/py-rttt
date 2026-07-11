@@ -21,7 +21,7 @@ class PyLinkRTTConnector(Connector):
         self.terminal_buffer_down_size = 0
         self.logger_buffer = logger_buffer
         self.log_up_size = 0
-        self._flash_lock = threading.Lock()
+        self._op_lock = threading.Lock()
 
     def start(self):
         """Start RTT and the read thread."""
@@ -193,7 +193,7 @@ class PyLinkRTTConnector(Connector):
 
     def flash(self, file_path: str, addr: int = 0):
         """Flash firmware file to device. Stops RTT, flashes, restarts RTT."""
-        if not self._flash_lock.acquire(blocking=False):
+        if not self._op_lock.acquire(blocking=False):
             self._emit(Event(EventType.FLASH, {
                 "status": "error", "file": file_path,
                 "error": "Flash operation already in progress"
@@ -291,7 +291,7 @@ class PyLinkRTTConnector(Connector):
                         "error": f"RTT restart failed: {e}"
                     }))
         finally:
-            self._flash_lock.release()
+            self._op_lock.release()
 
     def _try_resume(self):
         """Best-effort reset+go so a failure does not leave the target halted."""
