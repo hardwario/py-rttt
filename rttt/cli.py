@@ -57,9 +57,13 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--mcp-listen', type=str, help='MCP server listen address [host:]port.', show_default=True, default=DEFAULT_MCP_LISTEN)
 @click.option('--substitutions/--no-substitutions', is_flag=True, default=True, show_default=True, help='Enable template substitutions in terminal input.')
 @click.option('--trust-shells', is_flag=True, default=False, help='Trust shell substitutions in config without interactive prompt (for CI/scripts).')
+@click.option('--headless', is_flag=True, default=False, help='Run without the interactive console, MCP server only (requires --mcp).')
 @click.pass_obj
-def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, substitutions, trust_shells):
+def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, substitutions, trust_shells, headless):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
+
+    if headless and not mcp:
+        raise click.ClickException('--headless requires the MCP server, add --mcp (or mcp: true in config).')
 
     if substitutions:
         ensure_shell_trust(app.sources, trust_shells)
@@ -129,6 +133,18 @@ def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer,
     if console_file:
         text = f'Device: {device} J-Link sn: {serial}' if serial else f'Device: {device}'
         connector = FileLogMiddleware(connector, console_file, text=text)
+
+    if headless:
+        connector.open()
+        click.echo(f'MCP server running on {mcp_listen}, press Ctrl+C to exit.')
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            connector.close()
+        return
 
     console = Console(connector, history_file=history_file)
     console.run()
