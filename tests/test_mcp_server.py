@@ -3,7 +3,7 @@ import json
 import threading
 import pytest
 from rttt.connectors.base import Connector
-from rttt.connectors.mcp_server import MCPMiddleware, _hexdump
+from rttt.connectors.mcp_server import MCPMiddleware, _hexdump, _BearerAuthMiddleware
 from rttt.event import Event, EventType
 
 
@@ -163,6 +163,50 @@ def test_read_log_after_cursor_and_pattern():
 
     m, _ = asyncio.run(run())
     assert m._log_cursor == 5
+
+
+def run_auth_request(token, auth_header):
+    """Drive _BearerAuthMiddleware with a fake ASGI request, return (reached, status)."""
+    reached = {'value': False}
+
+    async def inner_app(scope, receive, send):
+        reached['value'] = True
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'ok'})
+
+    middleware = _BearerAuthMiddleware(inner_app, token)
+    headers = [(b'authorization', auth_header.encode())] if auth_header else []
+    scope = {'type': 'http', 'method': 'GET', 'path': '/mcp', 'headers': headers,
+             'query_string': b''}
+    sent = []
+
+    async def receive():
+        return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(middleware(scope, receive, send))
+    status = next(m['status'] for m in sent if m['type'] == 'http.response.start')
+    return reached['value'], status
+
+
+def test_bearer_auth_rejects_missing_token():
+    reached, status = run_auth_request('secret', None)
+    assert not reached
+    assert status == 401
+
+
+def test_bearer_auth_rejects_wrong_token():
+    reached, status = run_auth_request('secret', 'Bearer wrong')
+    assert not reached
+    assert status == 401
+
+
+def test_bearer_auth_accepts_valid_token():
+    reached, status = run_auth_request('secret', 'Bearer secret')
+    assert reached
+    assert status == 200
 
 
 def test_flash_missing_file():

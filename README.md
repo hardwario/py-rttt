@@ -68,7 +68,9 @@ Options:
   --history-file PATH        Path to history file. [default: ~/.rttt_history]
   --console-file PATH        Path to console file. [default: ~/.rttt_console]
   --mcp / --no-mcp           Enable MCP server. [default: no-mcp]
-  --mcp-listen TEXT           MCP server listen address [host:]port. [default: 127.0.0.1:8090]
+  --mcp-listen TEXT          MCP server listen address [host:]port. [default: 127.0.0.1:8090]
+  --mcp-token TOKEN          Require "Authorization: Bearer TOKEN" on the MCP
+                             server and upload endpoint.
   --substitutions / --no-substitutions
                              Enable template substitutions in terminal input.
                              [default: substitutions]
@@ -232,6 +234,39 @@ Add to your `.mcp.json`:
 }
 ```
 
+When the server runs with `--mcp-token`, add the matching header:
+
+```json
+{
+    "mcpServers": {
+        "rttt": {
+            "type": "http",
+            "url": "http://127.0.0.1:8090/mcp",
+            "headers": {
+                "Authorization": "Bearer <TOKEN>"
+            }
+        }
+    }
+}
+```
+
+### Authentication
+
+By default the MCP server has no authentication and binds to `127.0.0.1`,
+which is fine for local use. When exposing it to a network (e.g.
+`--mcp-listen 0.0.0.0:8090` on a shared debug box), set a token:
+
+```bash
+rttt --device NRF9151_XXCA --mcp --mcp-token "$(openssl rand -hex 16)"
+```
+
+Every HTTP request — both the `/mcp` endpoint and `/upload` — must then carry
+`Authorization: Bearer <TOKEN>`; anything else gets `401 Unauthorized`. The
+token can also come from the `RTTT_MCP_TOKEN` environment variable or the
+`mcp_token` key in `.rttt.yaml`. Note the transport is plain HTTP, so on an
+untrusted network the token (and everything else) is visible on the wire —
+use an SSH tunnel or a TLS reverse proxy for anything beyond a lab LAN.
+
 ### Available MCP Tools
 
 | Tool | Description |
@@ -277,9 +312,17 @@ curl --data-binary @fw.hex 'http://<host>:8090/upload?filename=fw.hex'
 Then pass the returned `path` to the `flash` tool. Allowed extensions are
 `.hex`, `.bin`, `.elf` and `.srec`; the body is limited to 64 MiB.
 
-> **Note:** the MCP server and the upload endpoint have no authentication.
-> The default bind is `127.0.0.1`; think twice before exposing them with
-> `--mcp-listen 0.0.0.0:8090` outside a trusted network.
+With `--mcp-token` set, include the header:
+
+```bash
+curl -H 'Authorization: Bearer <TOKEN>' \
+     --data-binary @fw.hex 'http://<host>:8090/upload?filename=fw.hex'
+```
+
+> **Note:** without `--mcp-token` the MCP server and the upload endpoint have
+> no authentication. The default bind is `127.0.0.1`; set a token before
+> exposing them with `--mcp-listen 0.0.0.0:8090` outside a trusted network
+> (see [Authentication](#authentication)).
 
 ## License
 

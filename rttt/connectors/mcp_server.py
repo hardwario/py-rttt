@@ -11,6 +11,27 @@ from rttt.event import Event, EventType
 from rttt.utils import parse_listen
 
 
+class _BearerAuthMiddleware:
+    """ASGI middleware requiring `Authorization: Bearer <token>` on every
+    HTTP request (covers both the /mcp endpoint and /upload)."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            headers = dict(scope.get('headers') or [])
+            auth = headers.get(b'authorization', b'').decode('latin-1')
+            if auth != f'Bearer {self.token}':
+                from starlette.responses import JSONResponse
+                response = JSONResponse(
+                    {"status": "error", "error": "unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def _hexdump(addr: int, data: bytes) -> list:
     """Format bytes as classic hexdump lines with address and ASCII column."""
     lines = []
@@ -39,10 +60,11 @@ class MCPMiddleware(AsyncMiddleware):
     Uses Streamable HTTP transport.
     """
 
-    def __init__(self, connector: Connector, listen: str = "127.0.0.1:8090", max_lines: int = 5000, name: str = "Device Console"):
+    def __init__(self, connector: Connector, listen: str = "127.0.0.1:8090", max_lines: int = 5000, name: str = "Device Console", token: str = None):
         super().__init__(connector)
         self.host, self.port = parse_listen(listen)
         self._check_port_available(self.host, self.port)
+        self.token = token
         self.max_lines = max_lines
         self._terminal_lines = deque(maxlen=max_lines)
         self._log_lines = deque(maxlen=max_lines)
@@ -74,12 +96,25 @@ class MCPMiddleware(AsyncMiddleware):
         finally:
             sock.close()
 
+    async def _serve(self):
+        """Run the Streamable HTTP server, optionally wrapped in bearer auth.
+
+        Mirrors FastMCP.run_streamable_http_async, which offers no hook to
+        wrap the ASGI app.
+        """
+        import uvicorn
+
+        app = self._mcp.streamable_http_app()
+        if self.token:
+            app = _BearerAuthMiddleware(app, self.token)
+        config = uvicorn.Config(app, host=self.host, port=self.port, log_level='critical')
+        await uvicorn.Server(config).serve()
+
     def open(self):
         super().open()
-        self._server_task = asyncio.run_coroutine_threadsafe(
-            self._mcp.run_streamable_http_async(), self._loop
-        )
-        logger.info(f'MCP server starting on http://{self.host}:{self.port}/mcp')
+        self._server_task = asyncio.run_coroutine_threadsafe(self._serve(), self._loop)
+        auth = 'bearer-token auth' if self.token else 'no auth'
+        logger.info(f'MCP server starting on http://{self.host}:{self.port}/mcp ({auth})')
 
     def close(self):
         if self._server_task:

@@ -55,11 +55,12 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--console-file', type=click.Path(writable=True), show_default=True, default=DEFAULT_CONSOLE_FILE)
 @click.option('--mcp/--no-mcp', is_flag=True, help='Enable MCP server.', show_default=True, default=False)
 @click.option('--mcp-listen', type=str, help='MCP server listen address [host:]port.', show_default=True, default=DEFAULT_MCP_LISTEN)
+@click.option('--mcp-token', type=str, metavar='TOKEN', help='Require "Authorization: Bearer TOKEN" on the MCP server and upload endpoint.', default=None)
 @click.option('--substitutions/--no-substitutions', is_flag=True, default=True, show_default=True, help='Enable template substitutions in terminal input.')
 @click.option('--trust-shells', is_flag=True, default=False, help='Trust shell substitutions in config without interactive prompt (for CI/scripts).')
 @click.option('--headless', is_flag=True, default=False, help='Run without the interactive console, MCP server only (requires --mcp).')
 @click.pass_obj
-def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, substitutions, trust_shells, headless):
+def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     if headless and not mcp:
@@ -122,7 +123,7 @@ def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer,
 
     if mcp:
         try:
-            connector = MCPMiddleware(connector, listen=mcp_listen)
+            connector = MCPMiddleware(connector, listen=mcp_listen, token=mcp_token)
         except MCPPortInUseError as e:
             raise click.ClickException(
                 f'MCP port {e.host}:{e.port} is already in use (another rttt instance?).\n'
