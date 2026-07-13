@@ -55,17 +55,24 @@ def save_trusted(trusted: dict[str, str]) -> None:
             f.write(f'{trusted[path]}  {path}\n')
 
 
-def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool) -> None:
-    """Prompt the user to approve shell substitutions from each config source.
+def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool, check_substitutions: bool = True) -> None:
+    """Prompt the user to approve shell commands from each config source.
 
-    For every source file that declares `shell:` substitutions, check the
-    persisted trust hash. If unknown or changed, prompt (or auto-accept with
-    --trust-shells). Exits the process if the user declines any source.
-    Silent no-op when no source has shell substitutions.
+    Covers `shell:` substitutions and the `flash_cmd` override — both run
+    arbitrary commands, so a config file from an untrusted project must be
+    confirmed first. Checks the persisted trust hash per source file; if
+    unknown or changed, prompt (or auto-accept with --trust-shells). Exits
+    the process if the user declines any source. Silent no-op when no source
+    declares shell commands.
     """
     pending: list[tuple[str, dict[str, str], str]] = []
     for path, data in sources:
-        shell_entries = extract_shell_entries((data or {}).get('substitutions'))
+        shell_entries = {}
+        if check_substitutions:
+            shell_entries = extract_shell_entries((data or {}).get('substitutions'))
+        flash_cmd = (data or {}).get('flash_cmd')
+        if flash_cmd:
+            shell_entries['<flash-cmd>'] = str(flash_cmd)
         if not shell_entries:
             continue
         pending.append((path, shell_entries, compute_hash(shell_entries)))
@@ -80,7 +87,7 @@ def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool) -> N
 
     if trust_shells:
         for path, _entries, h in needs_prompt:
-            logger.info(f'Trusting shell substitutions via --trust-shells for {path}')
+            logger.info(f'Trusting shell commands via --trust-shells for {path}')
             trusted[path] = h
         save_trusted(trusted)
         return
@@ -88,19 +95,19 @@ def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool) -> N
     if not sys.stdin.isatty():
         paths = ', '.join(p for p, _, _ in needs_prompt)
         click.secho(
-            f'Shell substitutions in {paths} require confirmation. '
+            f'Shell commands in {paths} require confirmation. '
             f'Run interactively once or pass --trust-shells.',
             err=True, fg='red')
         sys.exit(1)
 
     for path, entries, h in needs_prompt:
-        click.secho(f'\nConfig {path} defines shell substitutions:', fg='yellow')
+        click.secho(f'\nConfig {path} defines shell commands:', fg='yellow')
         for name, command in entries.items():
             click.echo(f'  {name}: {command}')
         click.echo()
 
         if not click.confirm('Allow these commands to run when expanded?', default=False):
-            click.secho('Shell substitutions declined. Exiting.', err=True, fg='red')
+            click.secho('Shell commands declined. Exiting.', err=True, fg='red')
             sys.exit(1)
 
         trusted[path] = h

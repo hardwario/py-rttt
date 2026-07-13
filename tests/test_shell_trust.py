@@ -70,6 +70,25 @@ def test_ensure_shell_trust_exits_when_hash_differs_and_noninteractive(trust_fil
     assert exc.value.code == 1
 
 
+def test_ensure_shell_trust_covers_flash_cmd(trust_file, monkeypatch):
+    # flash_cmd from a config is an arbitrary shell command and must require
+    # trust even when substitutions are disabled.
+    sources = [('/cfg.yaml', {'flash_cmd': 'nrfjprog --program {file}'})]
+    monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+
+    with pytest.raises(SystemExit):
+        ensure_shell_trust(sources, trust_shells=False, check_substitutions=False)
+
+    ensure_shell_trust(sources, trust_shells=True, check_substitutions=False)
+    assert load_trusted() == {'/cfg.yaml': compute_hash({'<flash-cmd>': 'nrfjprog --program {file}'})}
+
+
+def test_ensure_shell_trust_skips_substitutions_when_disabled(trust_file):
+    sources = [('/cfg.yaml', {'substitutions': {'GIT': {'shell': 'echo 1'}}})]
+    ensure_shell_trust(sources, trust_shells=False, check_substitutions=False)
+    assert not trust_file.exists()
+
+
 def test_ensure_shell_trust_accepts_multiple_sources_with_flag(trust_file):
     sources = [
         ('/home.yaml', {'substitutions': {'GIT': {'shell': 'echo a'}}}),

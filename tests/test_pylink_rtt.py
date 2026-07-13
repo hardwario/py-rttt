@@ -1,3 +1,4 @@
+import os
 import pytest
 import rttt.connectors.pylink_rtt as pylink_rtt_module
 from rttt.connectors.pylink_rtt import PyLinkRTTConnector
@@ -13,6 +14,24 @@ class FakeBufDesc:
 
 class FakeJLink:
     """Minimal stand-in for pylink.JLink driving PyLinkRTTConnector."""
+
+    def open(self, serial_no=None):
+        self.calls.append(('open', serial_no))
+
+    def close(self):
+        self.calls.append('close')
+
+    def disable_dialog_boxes(self):
+        pass
+
+    def set_speed(self, speed):
+        self.calls.append(('set_speed', speed))
+
+    def set_tif(self, tif):
+        pass
+
+    def connect(self, device):
+        self.calls.append(('connect', device))
 
     def __init__(self):
         self.num_up = 3
@@ -223,6 +242,100 @@ def test_flash_locked_reports_error(tmp_path, virtual_clock):
     final = flash_events(events)[-1]
     assert final['status'] == 'error'
     assert 'in progress' in final['error']
+
+
+def make_external_connector(jlink, flash_cmd):
+    conn = PyLinkRTTConnector(jlink, flash_cmd=flash_cmd,
+                              device='NRF9151_XXCA', serial=123, speed=2000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    return conn, events
+
+
+def test_flash_external_success(tmp_path, virtual_clock):
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+
+    jlink = FakeJLink()
+    conn, events = make_external_connector(jlink, 'echo programming {file} on {device}')
+    conn.flash(str(fw))
+
+    fevents = flash_events(events)
+    assert fevents[-1]['status'] == 'done'
+    progress = [e for e in fevents if e['status'] == 'progress']
+    assert any('programming' in e['message'] and 'fw.hex' in e['message'] for e in progress)
+    # J-Link released for the external tool and reconnected afterwards
+    assert 'close' in jlink.calls
+    assert ('connect', 'NRF9151_XXCA') in jlink.calls
+    assert jlink.calls.index('close') < jlink.calls.index(('connect', 'NRF9151_XXCA'))
+
+
+def test_flash_external_failure(tmp_path, virtual_clock):
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+
+    jlink = FakeJLink()
+    conn, events = make_external_connector(jlink, 'echo {file} && exit 3')
+    conn.flash(str(fw))
+
+    final = flash_events(events)[-1]
+    assert final['status'] == 'error'
+    assert 'exit code 3' in final['error']
+    # J-Link must be reconnected even after a failure
+    assert ('connect', 'NRF9151_XXCA') in jlink.calls
+
+
+def test_flash_external_requires_file_placeholder(tmp_path, virtual_clock):
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+
+    jlink = FakeJLink()
+    conn, events = make_external_connector(jlink, 'nrfjprog --program firmware.hex')
+    conn.flash(str(fw))
+
+    final = flash_events(events)[-1]
+    assert final['status'] == 'error'
+    assert '{file}' in final['error']
+
+
+def test_flash_external_quotes_file_path(tmp_path, virtual_clock):
+    # A malicious file path must not be able to inject shell commands.
+    evil_dir = tmp_path / 'a; touch pwned;'
+    evil_dir.mkdir()
+    fw = evil_dir / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+
+    jlink = FakeJLink()
+    conn, events = make_external_connector(jlink, 'echo {file}')
+    conn.flash(str(fw))
+
+    assert flash_events(events)[-1]['status'] == 'done'
+    assert not (tmp_path / 'pwned').exists()
+    assert not os.path.exists('pwned')
+
+
+def test_flash_external_allows_zip(tmp_path, virtual_clock):
+    fw = tmp_path / 'modem.zip'
+    fw.write_bytes(b'PK')
+
+    jlink = FakeJLink()
+    conn, events = make_external_connector(jlink, 'echo {file}')
+    conn.flash(str(fw))
+
+    assert flash_events(events)[-1]['status'] == 'done'
+
+
+def test_flash_zip_rejected_without_external_cmd(tmp_path, virtual_clock):
+    fw = tmp_path / 'modem.zip'
+    fw.write_bytes(b'PK')
+
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.flash(str(fw))
+
+    final = flash_events(events)[-1]
+    assert final['status'] == 'error'
+    assert 'Unsupported file format' in final['error']
 
 
 def test_reset_restarts_rtt(virtual_clock):

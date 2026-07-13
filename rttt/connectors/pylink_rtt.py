@@ -1,5 +1,7 @@
 import os
 import pylink
+import shlex
+import subprocess
 import time
 import threading
 from loguru import logger
@@ -9,7 +11,8 @@ from rttt.event import Event, EventType
 
 class PyLinkRTTConnector(Connector):
 
-    def __init__(self, jlink: pylink.JLink, terminal_buffer=0, logger_buffer=1, latency=50, block_address=None,) -> None:
+    def __init__(self, jlink: pylink.JLink, terminal_buffer=0, logger_buffer=1, latency=50, block_address=None,
+                 flash_cmd=None, device=None, serial=None, speed=None) -> None:
         super().__init__()
         self.jlink = jlink
         self.block_address = block_address
@@ -21,6 +24,10 @@ class PyLinkRTTConnector(Connector):
         self.terminal_buffer_down_size = 0
         self.logger_buffer = logger_buffer
         self.log_up_size = 0
+        self.flash_cmd = flash_cmd
+        self.device = device
+        self.serial = serial
+        self.speed = speed
         self._op_lock = threading.Lock()
 
     def start(self):
@@ -208,8 +215,12 @@ class PyLinkRTTConnector(Connector):
                 }))
                 return
 
+            allowed = ('.hex', '.bin', '.elf', '.srec')
+            if self.flash_cmd:
+                # external tools handle more formats (e.g. nrfjprog modem .zip)
+                allowed += ('.zip',)
             ext = os.path.splitext(file_path)[1].lower()
-            if ext not in ('.hex', '.bin', '.elf', '.srec'):
+            if ext not in allowed:
                 self._emit(Event(EventType.FLASH, {
                     "status": "error", "file": file_path,
                     "error": f"Unsupported file format: {ext}"
@@ -221,6 +232,28 @@ class PyLinkRTTConnector(Connector):
             was_running = self.is_running
             if was_running:
                 self.stop()
+
+            if self.flash_cmd:
+                try:
+                    self._flash_external(file_path, addr)
+                    self._emit(Event(EventType.FLASH, {
+                        "status": "done", "file": file_path
+                    }))
+                except Exception as e:
+                    logger.error(f'Flash: external command failed: {e}')
+                    self._emit(Event(EventType.FLASH, {
+                        "status": "error", "file": file_path, "error": str(e)
+                    }))
+                if was_running:
+                    try:
+                        self.start()
+                    except Exception as e:
+                        logger.error(f'Flash: failed to restart RTT: {e}')
+                        self._emit(Event(EventType.FLASH, {
+                            "status": "error", "file": file_path,
+                            "error": f"RTT restart failed: {e}"
+                        }))
+                return
 
             progress_calls = 0
 
@@ -299,6 +332,69 @@ class PyLinkRTTConnector(Connector):
             self.jlink.reset(ms=10, halt=False)
         except pylink.errors.JLinkException as e:
             logger.warning(f'Resume after failure failed: {e}')
+
+    def _flash_external(self, file_path: str, addr: int):
+        """Flash by running the user-provided external command.
+
+        The J-Link connection is closed for the duration of the command
+        (external tools need the debug probe) and reopened afterwards.
+        Raises on any failure.
+        """
+        if '{file}' not in self.flash_cmd:
+            raise Exception('flash command must contain the {file} placeholder')
+        try:
+            # The command template itself is trusted (CLI flag or a config
+            # that passed the shell-trust prompt), but substituted values are
+            # not — file paths arrive from MCP clients — so quote them.
+            cmd = self.flash_cmd.format(
+                file=shlex.quote(file_path), addr=f'0x{addr:X}',
+                device=shlex.quote(str(self.device or '')),
+                serial=shlex.quote(str(self.serial or '')))
+        except (KeyError, IndexError) as e:
+            raise Exception(f'Unknown placeholder in flash command: {e}') from e
+
+        logger.info(f'Flash: running external command: {cmd}')
+        self.jlink.close()
+        try:
+            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
+            deadline = time.monotonic() + 900
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    logger.info(f'Flash: {line}')
+                    self._emit(Event(EventType.FLASH, {
+                        "status": "progress", "action": "External", "message": line,
+                    }))
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    raise Exception('Flash command timed out (15 min)')
+            ret = proc.wait(timeout=60)
+            if ret != 0:
+                raise Exception(f'Flash command failed with exit code {ret}')
+            logger.info('Flash: external command complete')
+        finally:
+            self._reopen_jlink()
+
+    def _reopen_jlink(self):
+        """Reopen the J-Link connection after an external tool used the probe."""
+        self.jlink.open(serial_no=self.serial)
+        try:
+            self.jlink.disable_dialog_boxes()
+        except Exception:
+            pass
+        self.jlink.set_speed(self.speed or 2000)
+        self.jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        for attempt in range(3):
+            try:
+                self.jlink.connect(self.device)
+                return
+            except pylink.errors.JLinkException as e:
+                if attempt < 2:
+                    logger.warning(f'J-Link: reconnect attempt {attempt + 1} failed: {e}, retrying...')
+                    time.sleep(0.5)
+                else:
+                    raise Exception(f'J-Link reconnect failed: {e}') from e
 
     def _read_task(self):
         while self.is_running:

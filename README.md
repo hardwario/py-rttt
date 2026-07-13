@@ -61,6 +61,9 @@ Options:
   --device DEVICE            J-Link Device name.
   --speed SPEED              J-Link clock speed in kHz. [default: 2000]
   --reset                    Reset application firmware.
+  --flash-cmd COMMAND        External command used by the flash operation
+                             instead of the built-in J-Link programming.
+                             Must contain the {file} placeholder.
   --address ADDRESS          RTT block address.
   --terminal-buffer INTEGER  RTT Terminal buffer index. [default: 0]
   --logger-buffer INTEGER    RTT Logger buffer index. [default: 1]
@@ -288,6 +291,41 @@ use an SSH tunnel or a TLS reverse proxy for anything beyond a lab LAN.
 
 The server also exposes a `debug_device` MCP prompt describing typical
 debugging workflows and RTT troubleshooting for agent clients.
+
+### External Flash Command
+
+By default the `flash` operation programs the device through the J-Link DLL.
+When a different tool works better for your target (e.g. `nrfjprog` for nRF91,
+`hardwario` CLI, `west flash`), override it with `--flash-cmd` or the
+`flash_cmd` key in `.rttt.yaml`:
+
+```bash
+rttt --device NRF9151_XXCA --mcp \
+     --flash-cmd 'nrfjprog --family NRF91 --program {file} --sectorerase --verify --reset'
+```
+
+```yaml
+flash_cmd: "nrfjprog --family NRF91 --program {file} --sectorerase --verify --reset"
+```
+
+The command runs through the shell with these placeholders (values are
+shell-quoted automatically):
+
+| Placeholder | Value |
+|---|---|
+| `{file}` | Absolute path of the firmware file (required in the template) |
+| `{addr}` | Start address as hex, e.g. `0x0` |
+| `{device}` | J-Link device name |
+| `{serial}` | J-Link serial number (empty if not set) |
+
+The J-Link connection is released for the duration of the command so the
+external tool can claim the debug probe, and RTT re-attaches afterwards. The
+tool's output is streamed to the console and log. With an external command
+the `.zip` extension is also accepted (nrfjprog modem firmware packages).
+
+Because `flash_cmd` from a config file is an arbitrary shell command, it goes
+through the same trust prompt as [shell substitutions](#shell-substitutions)
+— you approve it once per config file (or pass `--trust-shells` in CI).
 
 ### Headless Mode
 

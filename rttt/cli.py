@@ -47,6 +47,10 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--device', type=str, metavar='DEVICE', help='J-Link Device name')
 @click.option('--speed', type=int, metavar="SPEED", help='J-Link clock speed in kHz', default=DEFAULT_JLINK_SPEED_KHZ, show_default=True)
 @click.option('--reset', is_flag=True, help='Reset application firmware.')
+@click.option('--flash-cmd', type=str, metavar='COMMAND', default=None,
+              help='External command used by the flash operation instead of the built-in '
+                   'J-Link programming, e.g. "nrfjprog --program {file} --sectorerase --verify --reset". '
+                   'Must contain the {file} placeholder; {addr}, {device} and {serial} are also available.')
 @click.option('--address', metavar="ADDRESS", type=IntOrHexParamType(), help='RTT block address.')
 @click.option('--terminal-buffer', type=int, help='RTT Terminal buffer index.', show_default=True, default=0)
 @click.option('--logger-buffer', type=int, help='RTT Logger buffer index.', show_default=True, default=1)
@@ -60,14 +64,13 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--trust-shells', is_flag=True, default=False, help='Trust shell substitutions in config without interactive prompt (for CI/scripts).')
 @click.option('--headless', is_flag=True, default=False, help='Run without the interactive console, MCP server only (requires --mcp).')
 @click.pass_obj
-def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
+def cli(app: CliContext, serial, device, speed, reset, flash_cmd, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     if headless and not mcp:
         raise click.ClickException('--headless requires the MCP server, add --mcp (or mcp: true in config).')
 
-    if substitutions:
-        ensure_shell_trust(app.sources, trust_shells)
+    ensure_shell_trust(app.sources, trust_shells, check_substitutions=substitutions)
 
     if not device:
         device = click.prompt('Device')
@@ -116,7 +119,8 @@ def cli(app: CliContext, serial, device, speed, reset, address, terminal_buffer,
             raise click.ClickException(f'J-Link: {e}') from e
         time.sleep(1)
 
-    connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address)
+    connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address,
+                                   flash_cmd=flash_cmd, device=device, serial=serial, speed=speed)
 
     if substitutions:
         connector = SubstitutionMiddleware(connector, substitutions=app.config.get('substitutions'))
