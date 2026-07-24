@@ -1,6 +1,8 @@
 import asyncio
 import json
+import socket
 import threading
+import time
 import pytest
 from rttt.connectors.base import Connector
 from rttt.connectors.mcp_server import MCPMiddleware, _hexdump, _BearerAuthMiddleware
@@ -218,3 +220,42 @@ def test_flash_missing_file():
         assert 'File not found' in result['error']
 
     asyncio.run(run())
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_close_releases_port():
+    """close() must free the listening port promptly, so rttt can be
+    restarted (or the port reused) right after shutdown."""
+    port = _free_port()
+    m = MCPMiddleware(FakeConnector(), listen=f'127.0.0.1:{port}')
+    m.open()
+
+    # Wait until the HTTP server is actually accepting connections.
+    for _ in range(50):
+        probe = socket.socket()
+        probe.settimeout(0.2)
+        try:
+            probe.connect(('127.0.0.1', port))
+            probe.close()
+            break
+        except OSError:
+            probe.close()
+            time.sleep(0.1)
+    else:
+        m.close()
+        pytest.fail('MCP server never started listening')
+
+    m.close()
+
+    # The port must be immediately bindable again — a bare task cancel()
+    # would leave the socket lingering and this would raise.
+    s = socket.socket()
+    s.bind(('127.0.0.1', port))
+    s.close()

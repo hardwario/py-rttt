@@ -80,6 +80,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._register_tools()
         self._register_routes()
         self._server_task = None
+        self._server = None
 
     @staticmethod
     def _check_port_available(host: str, port: int) -> None:
@@ -109,7 +110,8 @@ class MCPMiddleware(AsyncMiddleware):
         if self.token:
             app = _BearerAuthMiddleware(app, self.token)
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level='critical')
-        await uvicorn.Server(config).serve()
+        self._server = uvicorn.Server(config)
+        await self._server.serve()
 
     def open(self):
         super().open()
@@ -119,11 +121,22 @@ class MCPMiddleware(AsyncMiddleware):
 
     def close(self):
         if self._server_task:
-            self._server_task.cancel()
+            # Ask uvicorn to shut down gracefully instead of cancelling the
+            # task mid-serve(). A bare cancel() skips uvicorn's own shutdown
+            # and can leave the listening socket bound for a while, so the
+            # port would not be free right after rttt exits. should_exit lets
+            # serve() close the socket and return on its own.
+            if self._server is not None:
+                self._server.should_exit = True
             try:
-                self._server_task.result(timeout=3)
+                self._server_task.result(timeout=5)
             except Exception:
-                pass
+                # Fall back to cancellation if the graceful stop stalls.
+                self._server_task.cancel()
+                try:
+                    self._server_task.result(timeout=3)
+                except Exception:
+                    pass
         super().close()
 
     def _register_routes(self):
