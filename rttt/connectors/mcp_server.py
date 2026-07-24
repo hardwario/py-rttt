@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import socket
 import tempfile
@@ -339,7 +340,9 @@ class MCPMiddleware(AsyncMiddleware):
             """Flash a firmware file (.hex, .bin, .elf, .srec) to the target device.
 
             Stops the connection, programs the flash memory, resets the device,
-            and restarts the connection. Progress is reported to the console during flashing.
+            and restarts the connection. Progress is reported to the console during
+            flashing. The buffered terminal/log history is cleared, so read_log
+            and read_terminal afterwards only show output from the new firmware.
 
             Common firmware locations:
             - Zephyr/west: build/merged.hex (or build/<app>/merged.hex)
@@ -358,6 +361,13 @@ class MCPMiddleware(AsyncMiddleware):
             """
             if not os.path.isfile(file_path):
                 return {"status": "error", "error": f"File not found: {file_path}"}
+
+            # New firmware means a new session — drop the terminal/log history
+            # so read_log/read_terminal only show output from the flashed image.
+            # Cursors stay monotonic, so cursors obtained before the flash
+            # remain valid and simply return only post-flash lines.
+            middleware._terminal_lines.clear()
+            middleware._log_lines.clear()
 
             middleware._flash_events = []
             middleware._flash_done = asyncio.Event()
@@ -400,15 +410,34 @@ class MCPMiddleware(AsyncMiddleware):
                 middleware._flash_activity = None
 
         @self._mcp.tool()
-        async def reconnect() -> dict:
+        async def reconnect(address: str = "") -> dict:
             """Restart the RTT connection to the device.
 
             Use when the RTT session appears stuck — e.g. commands fail with
             "Shell buffer DOWN 0 has zero size", no output arrives anymore,
             or the device was reset/reflashed outside this tool. Does not
             reset the device, only re-attaches to its RTT control block.
+
+            Args:
+                address: Optional RTT control block address, e.g. "0x20004000"
+                    (the `_SEGGER_RTT` symbol address from the firmware ELF:
+                    `nm zephyr.elf | grep _SEGGER_RTT`). Overrides the J-Link
+                    auto-search, which can attach to a stale control block left
+                    in RAM by a previous firmware. Sticky for subsequent
+                    connections; pass "auto" to return to auto-search. Empty
+                    keeps the current setting.
             """
             conn = middleware._leaf()
+
+            if address:
+                if address.strip().lower() == "auto":
+                    conn.block_address = None
+                else:
+                    try:
+                        conn.block_address = int(address, 0)
+                    except ValueError:
+                        return {"status": "error",
+                                "error": f"Invalid address: {address!r} (use hex like 0x20004000, or \"auto\")"}
 
             def _do():
                 conn.stop()
@@ -469,7 +498,8 @@ class MCPMiddleware(AsyncMiddleware):
             return await middleware._run_target_op(_do)
 
         @self._mcp.tool()
-        async def read_memory(address: str, length: int = 64, width: int = 8) -> dict:
+        async def read_memory(address: str, length: int = 64, width: int = 8,
+                              to_file: str = "") -> dict:
             """Read target memory (RAM, flash, peripherals) via J-Link.
 
             Works while the firmware is running. Flash is memory-mapped, so
@@ -477,9 +507,16 @@ class MCPMiddleware(AsyncMiddleware):
 
             Args:
                 address: Start address, e.g. "0x10000" or decimal.
-                length: Number of bytes to read (max 65536).
+                length: Number of bytes to read (max 65536 inline, 16 MiB
+                    with `to_file`).
                 width: Access width in bits: 8, 16 or 32 (use 32 for
                     peripheral registers that ignore byte accesses).
+                to_file: Optional path to dump the raw bytes to instead of
+                    returning them inline (use for large blocks — the reply
+                    then carries only the path, size, sha256 and a short
+                    preview). A relative path is placed in the system temp
+                    directory. The path is resolved on the machine this
+                    server runs on.
             """
             conn = middleware._leaf()
             try:
@@ -488,13 +525,43 @@ class MCPMiddleware(AsyncMiddleware):
                 return {"status": "error", "error": f"Invalid address: {address}"}
             if width not in (8, 16, 32):
                 return {"status": "error", "error": "width must be 8, 16 or 32"}
-            length = min(int(length), 65536)
+            length = min(int(length), 16 * 1024 * 1024 if to_file else 65536)
             unit = width // 8
-            num_units = (length + unit - 1) // unit
+
+            def _read_block(a, n):
+                num_units = (n + unit - 1) // unit
+                units = conn.jlink.memory_read(a, num_units, nbits=width)
+                return b''.join(int(u).to_bytes(unit, 'little') for u in units)[:n]
+
+            if to_file:
+                path = to_file if os.path.isabs(to_file) else os.path.join(
+                    tempfile.gettempdir(), to_file)
+
+                def _do():
+                    digest = hashlib.sha256()
+                    total = 0
+                    preview = b''
+                    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+                    with open(path, 'wb') as f:
+                        while total < length:
+                            chunk = _read_block(addr + total, min(65536, length - total))
+                            f.write(chunk)
+                            digest.update(chunk)
+                            if not preview:
+                                preview = chunk[:64]
+                            total += len(chunk)
+                    return {
+                        "address": f'0x{addr:08X}',
+                        "length": total,
+                        "file": path,
+                        "sha256": digest.hexdigest(),
+                        "preview": _hexdump(addr, preview),
+                    }
+
+                return await middleware._run_target_op(_do, timeout=30.0 + length / 50000)
 
             def _do():
-                units = conn.jlink.memory_read(addr, num_units, nbits=width)
-                data = b''.join(int(u).to_bytes(unit, 'little') for u in units)[:length]
+                data = _read_block(addr, length)
                 return {
                     "address": f'0x{addr:08X}',
                     "length": len(data),
@@ -505,7 +572,8 @@ class MCPMiddleware(AsyncMiddleware):
             return await middleware._run_target_op(_do)
 
         @self._mcp.tool()
-        async def write_memory(address: str, data: str, width: int = 8) -> dict:
+        async def write_memory(address: str, data: str = "", width: int = 8,
+                               from_file: str = "") -> dict:
             """Write target memory (RAM or peripheral registers) via J-Link.
 
             Does NOT program flash — use `write_flash` for that.
@@ -514,12 +582,21 @@ class MCPMiddleware(AsyncMiddleware):
                 address: Start address, e.g. "0x20000000" or decimal.
                 data: Hex byte string, e.g. "deadbeef" (little-endian units).
                 width: Access width in bits: 8, 16 or 32.
+                from_file: Optional path to a file whose raw bytes are written
+                    instead of `data` (use for large blocks). The path is
+                    resolved on the machine this server runs on.
             """
             conn = middleware._leaf()
             try:
                 addr = int(address, 0)
-                raw = bytes.fromhex(data.replace(' ', ''))
-            except ValueError as e:
+                if from_file:
+                    if not os.path.isfile(from_file):
+                        return {"status": "error", "error": f"File not found: {from_file}"}
+                    with open(from_file, 'rb') as f:
+                        raw = f.read()
+                else:
+                    raw = bytes.fromhex(data.replace(' ', ''))
+            except (ValueError, OSError) as e:
                 return {"status": "error", "error": str(e)}
             if width not in (8, 16, 32):
                 return {"status": "error", "error": "width must be 8, 16 or 32"}
@@ -535,7 +612,7 @@ class MCPMiddleware(AsyncMiddleware):
             return await middleware._run_target_op(_do)
 
         @self._mcp.tool()
-        async def write_flash(address: str, data: str) -> dict:
+        async def write_flash(address: str, data: str = "", from_file: str = "") -> dict:
             """Program internal flash at the given address via J-Link.
 
             Resets and halts the target, programs (with erase) the given
@@ -544,12 +621,22 @@ class MCPMiddleware(AsyncMiddleware):
             Args:
                 address: Flash address, e.g. "0x10000".
                 data: Hex byte string to program, e.g. "96f3b83d...".
+                from_file: Optional path to a file whose raw bytes are
+                    programmed instead of `data` (use for large blobs; for
+                    whole .hex/.elf images prefer the `flash` tool). The path
+                    is resolved on the machine this server runs on.
             """
             conn = middleware._leaf()
             try:
                 addr = int(address, 0)
-                raw = bytes.fromhex(data.replace(' ', ''))
-            except ValueError as e:
+                if from_file:
+                    if not os.path.isfile(from_file):
+                        return {"status": "error", "error": f"File not found: {from_file}"}
+                    with open(from_file, 'rb') as f:
+                        raw = f.read()
+                else:
+                    raw = bytes.fromhex(data.replace(' ', ''))
+            except (ValueError, OSError) as e:
                 return {"status": "error", "error": str(e)}
             if not raw:
                 return {"status": "error", "error": "no data"}
