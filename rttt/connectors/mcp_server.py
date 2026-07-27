@@ -72,6 +72,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._terminal_cursor = 0
         self._log_cursor = 0
         self._terminal_event = asyncio.Event()
+        self._log_event = asyncio.Event()
         self._flash_events = []
         self._flash_done = None
         self._flash_activity = None
@@ -230,6 +231,7 @@ class MCPMiddleware(AsyncMiddleware):
         elif event.type == EventType.LOG:
             self._log_lines.append(event.data)
             self._log_cursor += 1
+            self._log_event.set()
         elif event.type == EventType.FLASH:
             # skip per-sector progress events — hundreds of them per flash
             if event.data.get("status") != "progress":
@@ -336,6 +338,178 @@ class MCPMiddleware(AsyncMiddleware):
                 except re.error:
                     pass
             return result
+
+        @self._mcp.tool()
+        async def wait_for_state(pattern: str, timeout: float = 60.0,
+                                 command: str = "", poll_interval: float = 5.0,
+                                 source: str = "log") -> dict:
+            """Block until a regex pattern appears in the device output, or
+            until `timeout` seconds elapse. Solves polling for a state such as
+            `cloud state -> initialized: yes` after a reset without repeatedly
+            calling read_log/send_command by hand.
+
+            Two modes:
+            - Passive (command=""): just watch new output as it arrives and
+              return as soon as a line matches `pattern`. Nothing is sent to
+              the device.
+            - Polling (command set): every `poll_interval` seconds the given
+              command is sent to the device shell, and the pattern is matched
+              against the lines that appear afterwards. Use for state queries
+              that must be re-issued until the desired answer shows up.
+
+            Only lines produced AFTER this call are matched (device history
+            already in the ring buffer is ignored).
+
+            A timeout does NOT raise — it returns a dict with status
+            "timeout" so the caller can inspect `last_lines` and decide what
+            to do next. A bad regex returns status "error".
+
+            Args:
+                pattern: Regex to wait for (case-insensitive, like read_log).
+                timeout: Max seconds to wait before giving up.
+                command: Optional shell command to send every `poll_interval`
+                    seconds. Empty = passive watching only.
+                poll_interval: Seconds between command sends (ignored when
+                    command is empty).
+                source: Where to look — "log" (device logs), "terminal"
+                    (shell output), or "both".
+
+            Returns:
+                On match: {"status": "ok", "matched": True, "pattern": ...,
+                    "matched_line": <str>, "elapsed": <s>, "log_cursor_end":
+                    ..., "terminal_cursor_end": ...}.
+                On timeout: {"status": "timeout", "matched": False,
+                    "pattern": ..., "elapsed": <s>, "last_lines": [~10 recent
+                    lines from the watched source], "log_cursor_end": ...,
+                    "terminal_cursor_end": ...}.
+                On bad regex: {"status": "error", "error": <msg>}.
+            """
+            import re
+            try:
+                regex = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                return {"status": "error", "error": f"invalid regex: {e}"}
+
+            if source not in ("log", "terminal", "both"):
+                return {"status": "error",
+                        "error": "source must be 'log', 'terminal' or 'both'"}
+
+            if command and poll_interval <= 0:
+                return {"status": "error",
+                        "error": "poll_interval must be > 0"}
+
+            watch_log = source in ("log", "both")
+            watch_terminal = source in ("terminal", "both")
+
+            log_start = middleware._log_cursor
+            terminal_start = middleware._terminal_cursor
+
+            def _new_lines():
+                """Return (log_lines, terminal_texts) that arrived after the
+                start cursors, oldest first."""
+                logs = []
+                if watch_log:
+                    new_log = middleware._log_cursor - log_start
+                    if new_log > 0:
+                        logs = list(middleware._log_lines)[-new_log:]
+                terms = []
+                if watch_terminal:
+                    new_term = middleware._terminal_cursor - terminal_start
+                    if new_term > 0:
+                        rows = list(middleware._terminal_lines)[-new_term:]
+                        out_rows = [r for r in rows if r["direction"] != "in"]
+                        terms = [r["text"] for r in out_rows]
+                return logs, terms
+
+            def _scan():
+                """Match new lines against the regex; return the first match
+                or None."""
+                logs, terms = _new_lines()
+                for line in logs + terms:
+                    if regex.search(line):
+                        return line
+                return None
+
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            deadline = start + timeout
+            next_poll = start if command else None
+
+            def _result_common():
+                return {
+                    "log_cursor_end": middleware._log_cursor,
+                    "terminal_cursor_end": middleware._terminal_cursor,
+                }
+
+            try:
+                while True:
+                    matched = _scan()
+                    if matched is not None:
+                        return {
+                            "status": "ok",
+                            "matched": True,
+                            "pattern": pattern,
+                            "matched_line": matched,
+                            "elapsed": loop.time() - start,
+                            **_result_common(),
+                        }
+
+                    now = loop.time()
+                    if now >= deadline:
+                        break
+
+                    # Send the command when its poll tick is due, then match
+                    # again on the next loop iteration.
+                    if command and next_poll is not None and now >= next_poll:
+                        middleware.connector.handle(Event(EventType.IN, command))
+                        next_poll += poll_interval
+
+                    remaining = deadline - now
+                    if command and next_poll is not None:
+                        remaining = min(remaining, next_poll - now)
+                    if remaining <= 0:
+                        continue
+
+                    if watch_log:
+                        middleware._log_event.clear()
+                    if watch_terminal:
+                        middleware._terminal_event.clear()
+
+                    waiters = []
+                    if watch_log:
+                        waiters.append(asyncio.ensure_future(
+                            middleware._log_event.wait()))
+                    if watch_terminal:
+                        waiters.append(asyncio.ensure_future(
+                            middleware._terminal_event.wait()))
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.wait(
+                                waiters,
+                                return_when=asyncio.FIRST_COMPLETED),
+                            timeout=remaining)
+                    except asyncio.TimeoutError:
+                        # Woke up for a poll tick or the deadline — loop and
+                        # re-check state.
+                        pass
+                    finally:
+                        for w in waiters:
+                            if not w.done():
+                                w.cancel()
+
+                # Timed out without a match.
+                logs, terms = _new_lines()
+                last = (logs + terms)[-10:]
+                return {
+                    "status": "timeout",
+                    "matched": False,
+                    "pattern": pattern,
+                    "elapsed": loop.time() - start,
+                    "last_lines": last,
+                    **_result_common(),
+                }
+            except asyncio.CancelledError:
+                raise
 
         @self._mcp.tool()
         def status() -> dict:

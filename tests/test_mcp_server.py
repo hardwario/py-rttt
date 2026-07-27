@@ -116,6 +116,127 @@ def test_send_command_echo_does_not_end_wait():
     asyncio.run(run())
 
 
+def test_wait_for_state_passive_match():
+    async def run():
+        m, _ = make_middleware()
+
+        async def feeder():
+            await asyncio.sleep(0.02)
+            await m._process(Event(EventType.LOG, 'cloud state: connecting'))
+            await asyncio.sleep(0.02)
+            await m._process(Event(EventType.LOG, 'cloud state: initialized: yes'))
+
+        task = asyncio.create_task(feeder())
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_state',
+            {'pattern': 'initialized: yes', 'timeout': 2.0, 'source': 'log'}))
+        await task
+
+        assert result['status'] == 'ok'
+        assert result['matched'] is True
+        assert 'initialized: yes' in result['matched_line']
+
+    asyncio.run(run())
+
+
+def test_wait_for_state_timeout_returns_state():
+    async def run():
+        m, _ = make_middleware()
+
+        async def feeder():
+            await asyncio.sleep(0.02)
+            await m._process(Event(EventType.LOG, 'still booting'))
+            await m._process(Event(EventType.LOG, 'not there yet'))
+
+        task = asyncio.create_task(feeder())
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_state',
+            {'pattern': 'will never appear', 'timeout': 0.5, 'source': 'log'}))
+        await task
+
+        assert result['status'] == 'timeout'
+        assert result['matched'] is False
+        assert result['last_lines']
+        assert 'still booting' in result['last_lines']
+
+    asyncio.run(run())
+
+
+def test_wait_for_state_polls_command():
+    async def run():
+        m, conn = make_middleware()
+        # No matching output ever arrives, so the tool keeps polling until
+        # the timeout and we can assert the command was sent at least once.
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_state',
+            {'pattern': 'never', 'timeout': 0.6, 'command': 'cloud state',
+             'poll_interval': 0.2, 'source': 'log'}))
+
+        assert result['status'] == 'timeout'
+        sent = [e for e in conn.handled
+                if e.type == EventType.IN and e.data == 'cloud state']
+        assert len(sent) >= 1
+
+    asyncio.run(run())
+
+
+def test_wait_for_state_zero_poll_interval_errors():
+    # poll_interval=0 with a command would busy-loop and starve the event
+    # loop; it must be rejected quickly instead.
+    async def run():
+        m, _ = make_middleware()
+        result = tool_result(await asyncio.wait_for(m._mcp.call_tool(
+            'wait_for_state',
+            {'pattern': 'never', 'timeout': 60.0, 'command': 'cloud state',
+             'poll_interval': 0.0, 'source': 'log'}), timeout=1.0))
+
+        assert result['status'] == 'error'
+        assert result['error'] == 'poll_interval must be > 0'
+
+    asyncio.run(run())
+
+
+def test_wait_for_state_polling_ignores_command_echo():
+    # In polling mode the sent command is echoed into the terminal buffer as
+    # an "in" line. That echo must not match the pattern as a false positive;
+    # only the real device response should.
+    async def run():
+        m, _ = make_middleware()
+
+        async def feeder():
+            await asyncio.sleep(0.02)
+            # Echo of the command we send (direction "in") — must be ignored.
+            await m._process(Event(EventType.IN, 'cloud state'))
+            await asyncio.sleep(0.05)
+            # Real device response (direction "out") — must match.
+            await m._process(Event(EventType.OUT, 'cloud state initialized'))
+
+        task = asyncio.create_task(feeder())
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_state',
+            {'pattern': 'cloud state', 'timeout': 2.0,
+             'command': 'cloud state', 'poll_interval': 5.0,
+             'source': 'terminal'}))
+        await task
+
+        assert result['status'] == 'ok'
+        assert result['matched'] is True
+        assert result['matched_line'] == 'cloud state initialized'
+
+    asyncio.run(run())
+
+
+def test_wait_for_state_bad_regex():
+    async def run():
+        m, _ = make_middleware()
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_state', {'pattern': '([unclosed', 'timeout': 0.1}))
+        assert result['status'] == 'error'
+        assert 'regex' in result['error']
+
+    asyncio.run(run())
+
+
 def test_run_target_op_reports_busy_lock():
     async def run():
         m, conn = make_middleware()
