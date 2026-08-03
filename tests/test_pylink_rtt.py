@@ -1,3 +1,4 @@
+import time
 import os
 import pytest
 import rttt.connectors.pylink_rtt as pylink_rtt_module
@@ -491,3 +492,76 @@ def test_undecodable_buffer_name_does_not_break_resolution(virtual_clock):
     stop_read_thread(conn)
 
     assert conn.terminal_buffer == 1
+
+
+def conn_events(events):
+    return [e.data for e in events if e.type == EventType.CONN]
+
+
+def test_conn_emit_dedups_transitions():
+    # Deterministic check of the transition guard, no threads involved: the
+    # read task calls this every cycle and must not produce an event per call.
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+
+    conn._emit_conn(True)
+    conn._emit_conn(True)
+    conn._emit_conn(True)
+    assert [e['status'] for e in conn_events(events)] == ['connected']
+
+    conn._emit_conn(False, 'boom')
+    conn._emit_conn(False, 'boom')
+    assert [e['status'] for e in conn_events(events)] == ['connected', 'disconnected']
+    assert conn_events(events)[-1]['error'] == 'boom'
+
+    conn._emit_conn(True)
+    assert [e['status'] for e in conn_events(events)] == ['connected', 'disconnected', 'connected']
+
+
+def test_conn_reported_on_start_and_stop(virtual_clock):
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    assert conn_events(events) == [{'source': 'rtt', 'status': 'connected', 'error': ''}]
+
+    conn.stop()
+    assert conn_events(events)[-1] == {'source': 'rtt', 'status': 'disconnected', 'error': ''}
+
+
+def test_conn_disconnect_and_recovery_from_read_task():
+    # Real clock on purpose: virtual_clock patches time.sleep on the time
+    # module itself, so the read thread would never get to run.
+    import pylink as pylink_mod
+
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    assert [e['status'] for e in conn_events(events)] == ['connected']
+
+    def dead_read(index, num_bytes):
+        raise pylink_mod.errors.JLinkException('Cannot read from target')
+
+    jlink.rtt_read = dead_read
+    time.sleep(0.3)
+
+    down = [e for e in conn_events(events) if e['status'] == 'disconnected']
+    assert len(down) == 1, conn_events(events)
+    assert 'Cannot read from target' in down[0]['error']
+
+    jlink.rtt_read = lambda index, num_bytes: []
+    time.sleep(0.3)
+    stop_read_thread(conn)
+
+    # down and up reported once each, despite many read cycles either side
+    assert [e['status'] for e in conn_events(events)] == [
+        'connected', 'disconnected', 'connected']
+
+
+def test_conn_stays_quiet_while_healthy():
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    time.sleep(0.4)
+    stop_read_thread(conn)
+
+    assert [e['status'] for e in conn_events(events)] == ['connected']

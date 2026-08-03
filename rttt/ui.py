@@ -27,9 +27,18 @@ class State:
         self.flash_action = ""
         self.flash_error = ""
         self.flash_bar = None
+        # transport source -> {'status': ..., 'error': ...}, from CONN events
+        self.conn = {}
 
     def is_show_status_bar(self):
         return self.show_status_bar
+
+    def set_conn(self, source, status, error=''):
+        self.conn[source] = {'status': status, 'error': error}
+
+    def conn_down(self):
+        """Sources whose transport is not currently connected."""
+        return [s for s, v in sorted(self.conn.items()) if v.get('status') != 'connected']
 
     def is_show_terminal(self):
         return self.show == self.SHOW_TERMINAL
@@ -119,7 +128,7 @@ def create_status_bar(state):
     Create the status bar for the console.
     """
     def get_statusbar_text():
-        return [
+        items = [
             ('class:title', ' HARDWARIO RTTT Console     '),
             ('class:title', ' <F3> Focus '),
             ('class:title', ' <F5> Pause ') if state.scroll_to_end else ('class:yellow', ' <F5> Pause '),
@@ -127,6 +136,11 @@ def create_status_bar(state):
             ('class:title', ' <F10> Exit (or Ctrl-<F10>) '),
             ('class:title', ' [Shift-]<Tab> Cycle '),
         ]
+        # A dropped transport otherwise looks exactly like an idle device, so
+        # keep it on the bar rather than in a line that scrolls away.
+        for source in state.conn_down():
+            items.append(('fg:#ff4444 bold', f' {source.upper()} DISCONNECTED '))
+        return items
 
     def get_statusbar_time():
         return datetime.now().strftime('%b %d, %Y  %H:%M:%S')

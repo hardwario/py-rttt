@@ -13,6 +13,7 @@ class FileLogMiddleware(AsyncMiddleware):
         EventType.OUT: ' > ',
         EventType.IN: ' < ',
         EventType.FLASH: ' ! ',
+        EventType.CONN: ' @ ',
     }
 
     def __init__(self, connector: Connector, file_path: str, text: str = '') -> None:
@@ -60,6 +61,11 @@ class FileLogMiddleware(AsyncMiddleware):
                     text = f'FLASH [{data.get("percentage", 0):3d}%] {data.get("action", "")}'
                 else:
                     text = f'FLASH {status}: {data}'
+            elif event.type == EventType.CONN:
+                data = event.data
+                text = f'{data.get("source", "")} {data.get("status", "")}'.strip()
+                if data.get('error'):
+                    text = f'{text}: {data["error"]}'
             else:
                 text = event.data
             line = f'{t}{prefix}{text}\n'

@@ -130,6 +130,12 @@ class Console:
                         elif status == "error":
                             self.state.flash_error = data.get("message", "Flash error")
                         self.app.invalidate()
+                    elif event.type == EventType.CONN:
+                        data = event.data
+                        self.state.set_conn(data.get("source", ""),
+                                            data.get("status", ""),
+                                            data.get("error", ""))
+                        self.app.invalidate()
 
         def pre_run():
             self.events = asyncio.Queue()

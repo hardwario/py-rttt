@@ -74,6 +74,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._terminal_event = asyncio.Event()
         self._log_event = asyncio.Event()
         self._flash_events = []
+        self._conn = {}
         self._flash_done = None
         self._flash_activity = None
         self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
@@ -232,6 +233,10 @@ class MCPMiddleware(AsyncMiddleware):
             self._log_lines.append(event.data)
             self._log_cursor += 1
             self._log_event.set()
+        elif event.type == EventType.CONN:
+            data = event.data
+            self._conn[data.get("source", "")] = {"status": data.get("status", ""),
+                                                  "error": data.get("error", "")}
         elif event.type == EventType.FLASH:
             # skip per-sector progress events — hundreds of them per flash
             if event.data.get("status") != "progress":
@@ -513,13 +518,21 @@ class MCPMiddleware(AsyncMiddleware):
 
         @self._mcp.tool()
         def status() -> dict:
-            """Get session statistics: total and buffered terminal/log line counts and current cursors."""
+            """Get session statistics and transport connection state.
+
+            `connections` maps each transport (e.g. "rtt") to its current
+            status. Check it when output stops arriving or a command returns
+            nothing: a disconnected transport means the device is unreachable,
+            not idle, so retrying or waiting will not help — call `reconnect`
+            (or reattach the probe) instead.
+            """
             return {
                 "terminal_total": middleware._terminal_cursor,
                 "terminal_buffered": len(middleware._terminal_lines),
                 "log_total": middleware._log_cursor,
                 "log_buffered": len(middleware._log_lines),
                 "buffer_size": middleware.max_lines,
+                "connections": dict(middleware._conn),
             }
 
         @self._mcp.tool()

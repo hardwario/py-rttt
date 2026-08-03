@@ -6,7 +6,7 @@ import time
 import pytest
 from rttt.connectors.base import Connector
 from rttt.connectors.mcp_server import MCPMiddleware, _hexdump, _BearerAuthMiddleware
-from rttt.event import Event, EventType
+from rttt.event import Event, EventType, conn_event
 
 
 class FakeConnector(Connector):
@@ -380,3 +380,38 @@ def test_close_releases_port():
     s = socket.socket()
     s.bind(('127.0.0.1', port))
     s.close()
+
+
+def test_status_reports_connection_state():
+    m, _ = make_middleware()
+
+    async def run():
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        # nothing seen yet
+        assert result['connections'] == {}
+
+        await m._process(conn_event('rtt', 'disconnected', 'Cannot read from target'))
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        assert result['connections'] == {
+            'rtt': {'status': 'disconnected', 'error': 'Cannot read from target'}}
+
+        await m._process(conn_event('rtt', 'connected'))
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        assert result['connections']['rtt']['status'] == 'connected'
+
+    asyncio.run(run())
+
+
+def test_status_tracks_sources_independently():
+    # An MQTT bridge over an RTT connector: one dropping must not mask the other.
+    m, _ = make_middleware()
+
+    async def run():
+        await m._process(conn_event('rtt', 'connected'))
+        await m._process(conn_event('mqtt', 'disconnected', 'not authorised'))
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        assert result['connections']['rtt']['status'] == 'connected'
+        assert result['connections']['mqtt']['status'] == 'disconnected'
+        assert result['connections']['mqtt']['error'] == 'not authorised'
+
+    asyncio.run(run())

@@ -6,7 +6,9 @@ import time
 import threading
 from loguru import logger
 from rttt.connectors.base import Connector
-from rttt.event import Event, EventType
+from rttt.event import Event, EventType, conn_event
+
+CONN_SOURCE = 'rtt'
 
 
 class PyLinkRTTConnector(Connector):
@@ -35,6 +37,19 @@ class PyLinkRTTConnector(Connector):
         self.serial = serial
         self.speed = speed
         self._op_lock = threading.Lock()
+        # None until the first CONN event, so the initial connect is reported.
+        self._conn_up = None
+
+    def _emit_conn(self, up, error=''):
+        """Emit a CONN event, but only when the state actually changed.
+
+        The read task retries a dead link every cycle, so emitting per failure
+        would flood the console and the log file.
+        """
+        if self._conn_up is up:
+            return
+        self._conn_up = up
+        self._emit(conn_event(CONN_SOURCE, 'connected' if up else 'disconnected', error))
 
     @staticmethod
     def _descriptor_name(desc):
@@ -180,6 +195,7 @@ class PyLinkRTTConnector(Connector):
 
         self.thread = threading.Thread(target=self._read_task, daemon=True)
         self.thread.start()
+        self._emit_conn(True)
 
     def reset(self, halt=False):
         """Reset the target. Restarts the RTT session unless halting."""
@@ -201,6 +217,7 @@ class PyLinkRTTConnector(Connector):
             self.thread.join()
             self.thread = None
         self.jlink.rtt_stop()
+        self._emit_conn(False)
 
     def open(self):
         super().open()
@@ -445,6 +462,7 @@ class PyLinkRTTConnector(Connector):
                 (self.terminal_buffer, self.terminal_buffer_up_size, EventType.OUT),
                 (self.logger_buffer, self.log_up_size, EventType.LOG)
             ]
+            failure = None
             for idx, num_bytes, event_type in channels:
                 if idx is None:
                     continue
@@ -472,5 +490,13 @@ class PyLinkRTTConnector(Connector):
 
                                 self._emit(Event(event_type, line))
                 except Exception as e:
+                    failure = e
                     logger.error(f'Error reading RTT buffer {idx}: {e}')
+
+            # One verdict per cycle, so a buffer that reads fine while another
+            # fails cannot flip the state back and forth. Skipped while
+            # stopping, where stop() reports the disconnect itself.
+            if self.is_running:
+                self._emit_conn(failure is None, str(failure) if failure else '')
+
             time.sleep(self.rtt_read_delay)
