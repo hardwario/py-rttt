@@ -19,16 +19,60 @@ class PyLinkRTTConnector(Connector):
         self.rtt_read_delay = latency / 1000.0
         self.is_running = False
         self.thread = None
-        self.terminal_buffer = terminal_buffer
+        # terminal_buffer and logger_buffer accept an index or a buffer name.
+        # Names are resolved against the up descriptors on every start(), so a
+        # reflash that moves the buffers is picked up; the public attributes
+        # stay indices either way.
+        self._terminal_spec = terminal_buffer
+        self._logger_spec = logger_buffer
+        self.terminal_buffer = terminal_buffer if isinstance(terminal_buffer, int) else 0
         self.terminal_buffer_up_size = 0
         self.terminal_buffer_down_size = 0
-        self.logger_buffer = logger_buffer
+        self.logger_buffer = logger_buffer if isinstance(logger_buffer, int) else 1
         self.log_up_size = 0
         self.flash_cmd = flash_cmd
         self.device = device
         self.serial = serial
         self.speed = speed
         self._op_lock = threading.Lock()
+
+    @staticmethod
+    def _descriptor_name(desc):
+        """Buffer name from a descriptor, tolerating undecodable bytes."""
+        try:
+            return desc.name
+        except UnicodeDecodeError:
+            return desc.acName.decode('utf-8', errors='replace')
+
+    def _resolve_buffer_names(self, num_up):
+        """Map any buffer given by name onto its index.
+
+        Returns False when a requested name is not present yet. Buffers
+        register one by one during boot, so the caller treats that like an
+        uninitialized control block and retries.
+        """
+        names = None
+        for attr, spec in (('terminal_buffer', self._terminal_spec),
+                           ('logger_buffer', self._logger_spec)):
+            if not isinstance(spec, str):
+                continue
+
+            if names is None:
+                names = {}
+                for i in range(num_up):
+                    try:
+                        names[self._descriptor_name(self.jlink.rtt_get_buf_descriptor(i, 1))] = i
+                    except pylink.errors.JLinkException:
+                        break
+
+            if spec not in names:
+                logger.info(f'RTT buffer {spec!r} not registered yet, retrying search...')
+                return False
+
+            setattr(self, attr, names[spec])
+            logger.info(f'RTT buffer {spec!r} resolved to index {names[spec]}')
+
+        return True
 
     def start(self):
         """Start RTT and the read thread."""
@@ -59,8 +103,10 @@ class PyLinkRTTConnector(Connector):
                 except pylink.errors.JLinkException as e:
                     raise Exception(f'J-Link: {e}') from e
 
+            resolved = num_up is not None and self._resolve_buffer_names(num_up)
+
             attached = False
-            while num_up is not None and num_up > self.terminal_buffer:
+            while resolved and num_up > self.terminal_buffer:
                 # The firmware registers RTT buffers one by one during boot
                 # (terminal first, logger later), so wait until both report
                 # a non-zero size — attaching in between leaves the logger
@@ -119,10 +165,7 @@ class PyLinkRTTConnector(Connector):
 
         for i in range(num_up):
             desc = self.jlink.rtt_get_buf_descriptor(i, 1)
-            try:
-                name = desc.name
-            except UnicodeDecodeError:
-                name = desc.acName.decode('utf-8', errors='replace')
+            name = self._descriptor_name(desc)
             logger.info(f'Up buffer {i}: {name} <Index={desc.BufferIndex}, Size={desc.SizeOfBuffer}>')
             if i == self.terminal_buffer:
                 self.terminal_buffer_up_size = desc.SizeOfBuffer
@@ -130,10 +173,7 @@ class PyLinkRTTConnector(Connector):
                 self.log_up_size = desc.SizeOfBuffer
         for i in range(num_down):
             desc = self.jlink.rtt_get_buf_descriptor(i, 0)
-            try:
-                name = desc.name
-            except UnicodeDecodeError:
-                name = desc.acName.decode('utf-8', errors='replace')
+            name = self._descriptor_name(desc)
             logger.info(f'Down buffer {i}: {name} <Index={desc.BufferIndex}, Size={desc.SizeOfBuffer}>')
             if i == self.terminal_buffer:
                 self.terminal_buffer_down_size = desc.SizeOfBuffer

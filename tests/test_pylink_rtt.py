@@ -48,6 +48,8 @@ class FakeJLink:
         }
         self.calls = []
         self.flash_progress_actions = ['Compare', 'Program', 'Verify']
+        # names[(index, up)] -> buffer name reported by the descriptor
+        self.names = {}
 
     def _next_size(self, key):
         seq = self.sizes[key]
@@ -66,7 +68,7 @@ class FakeJLink:
         return self.num_down
 
     def rtt_get_buf_descriptor(self, index, up):
-        return FakeBufDesc(index, self._next_size((index, up)))
+        return FakeBufDesc(index, self._next_size((index, up)), self.names.get((index, up), ''))
 
     def rtt_read(self, index, num_bytes):
         return []
@@ -366,3 +368,126 @@ def test_reset_halt_leaves_rtt_stopped(virtual_clock):
     assert ('reset', True) in jlink.calls
     assert 'rtt_start' not in jlink.calls
     assert not conn.is_running
+
+
+class UndecodableName:
+    """Descriptor whose .name raises, as pylink does for non-UTF-8 bytes."""
+
+    def __init__(self, index, size, raw):
+        self.BufferIndex = index
+        self.SizeOfBuffer = size
+        self.acName = raw
+
+    @property
+    def name(self):
+        raise UnicodeDecodeError('utf-8', self.acName, 0, 1, 'invalid start byte')
+
+
+def test_buffer_names_resolve_to_indices(virtual_clock):
+    # Firmware registers Logger first, so the names do not sit on the
+    # default 0/1 indices.
+    jlink = FakeJLink()
+    jlink.names = {(0, 1): 'Logger', (2, 1): 'Terminal', (2, 0): 'Terminal'}
+    jlink.sizes[(0, 1)] = [4096]
+    jlink.sizes[(2, 1)] = [1024]
+    jlink.sizes[(2, 0)] = [256]
+
+    conn = PyLinkRTTConnector(jlink, terminal_buffer='Terminal', logger_buffer='Logger')
+    conn.start()
+    stop_read_thread(conn)
+
+    assert conn.terminal_buffer == 2
+    assert conn.logger_buffer == 0
+    assert conn.terminal_buffer_up_size == 1024
+    assert conn.log_up_size == 4096
+    assert conn.terminal_buffer_down_size == 256
+
+
+def test_integer_buffers_still_work(virtual_clock):
+    # Named lookup must not disturb the index-based default.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, terminal_buffer=0, logger_buffer=1)
+    conn.start()
+    stop_read_thread(conn)
+
+    assert conn.terminal_buffer == 0
+    assert conn.logger_buffer == 1
+    assert conn.terminal_buffer_up_size == 1024
+    assert conn.log_up_size == 4096
+
+
+def test_buffer_names_are_reresolved_on_restart(virtual_clock):
+    # A reflash can move the buffers; the second start() must not reuse the
+    # index resolved for the previous firmware.
+    jlink = FakeJLink()
+    jlink.names = {(0, 1): 'Terminal', (0, 0): 'Terminal'}
+    conn = PyLinkRTTConnector(jlink, terminal_buffer='Terminal', logger_buffer=1)
+    conn.start()
+    stop_read_thread(conn)
+    assert conn.terminal_buffer == 0
+
+    jlink.names = {(2, 1): 'Terminal', (2, 0): 'Terminal'}
+    jlink.sizes[(2, 1)] = [1024]
+    jlink.sizes[(2, 0)] = [256]
+    conn.start()
+    stop_read_thread(conn)
+
+    assert conn.terminal_buffer == 2
+
+
+def test_missing_buffer_name_fails_after_deadline(virtual_clock):
+    jlink = FakeJLink()
+    jlink.names = {(0, 1): 'Terminal', (0, 0): 'Terminal'}
+
+    conn = PyLinkRTTConnector(jlink, terminal_buffer='Terminal', logger_buffer='NoSuchBuffer')
+    with pytest.raises(Exception, match='Failed to find RTT block'):
+        conn.start()
+    stop_read_thread(conn)
+
+    # It kept retrying the search rather than giving up on the first pass.
+    assert jlink.calls.count('rtt_start') > 1
+
+
+def test_buffer_name_appearing_late_is_picked_up(virtual_clock):
+    # The named buffer is absent on the first search and shows up on a retry.
+    jlink = FakeJLink()
+    jlink.names = {(0, 1): 'Terminal', (0, 0): 'Terminal'}
+
+    conn = PyLinkRTTConnector(jlink, terminal_buffer='Terminal', logger_buffer='Logger')
+
+    real = jlink.rtt_start
+    state = {'n': 0}
+
+    def rtt_start(block_address=None):
+        state['n'] += 1
+        if state['n'] == 3:
+            jlink.names[(1, 1)] = 'Logger'
+        real(block_address)
+
+    jlink.rtt_start = rtt_start
+
+    conn.start()
+    stop_read_thread(conn)
+
+    assert conn.terminal_buffer == 0
+    assert conn.logger_buffer == 1
+
+
+def test_undecodable_buffer_name_does_not_break_resolution(virtual_clock):
+    jlink = FakeJLink()
+    jlink.names = {(1, 1): 'Terminal', (1, 0): 'Terminal'}
+    jlink.sizes[(1, 0)] = [256]
+
+    def rtt_get_buf_descriptor(index, up):
+        size = jlink._next_size((index, up))
+        if index == 0:
+            return UndecodableName(index, size, b'\xff\xfe')
+        return FakeBufDesc(index, size, jlink.names.get((index, up), ''))
+
+    jlink.rtt_get_buf_descriptor = rtt_get_buf_descriptor
+
+    conn = PyLinkRTTConnector(jlink, terminal_buffer='Terminal', logger_buffer=2)
+    conn.start()
+    stop_read_thread(conn)
+
+    assert conn.terminal_buffer == 1
