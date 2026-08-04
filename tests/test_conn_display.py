@@ -252,6 +252,85 @@ def test_checkbox_starts_ticked_when_the_cli_asked_for_it():
     assert '[x] Auto reconnect' in console.state.auto_reconnect_button.text
 
 
+def test_both_dialog_buttons_are_reachable_with_tab():
+    # Buttons in a float are useless if the focus cycle skips them; that is
+    # what made the dialog look like it had no working controls.
+    import asyncio as _asyncio
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
+    from prompt_toolkit.layout.layout import Layout
+    from prompt_toolkit.output import DummyOutput
+    from rttt.ui import create_layout
+
+    state = State()
+    root, input_field, _terminal, _log = create_layout(state, None)
+    state.set_conn('rtt', 'disconnected', 'Target has no power (VTref 0 mV)')
+
+    bindings = KeyBindings()
+    bindings.add('tab')(focus_previous)
+    bindings.add('s-tab')(focus_next)
+
+    visited = []
+
+    async def main():
+        with create_pipe_input() as inp:
+            app = Application(layout=Layout(root, focused_element=input_field),
+                              key_bindings=bindings, full_screen=True,
+                              input=inp, output=DummyOutput())
+            state.set_app(app)
+
+            async def probe():
+                await _asyncio.sleep(0.1)
+                for _ in range(6):
+                    inp.send_text('\t')
+                    await _asyncio.sleep(0.05)
+                    visited.append(app.layout.current_window)
+                app.exit()
+
+            app.create_background_task(probe())
+            await app.run_async()
+
+    _asyncio.run(main())
+
+    assert state.reconnect_button.window in visited, 'Reconnect is not reachable with Tab'
+    assert state.auto_reconnect_button.window in visited, \
+        'Auto reconnect is not reachable with Tab'
+
+
+def test_dialog_says_how_to_press_the_buttons():
+    # Nothing about a focused-then-Enter button is discoverable on its own.
+    from prompt_toolkit.layout import walk
+    from prompt_toolkit.layout.containers import Window
+    from rttt.ui import create_layout
+
+    state = State()
+    root, _input, _terminal, _log = create_layout(state, None)
+    state.set_conn('rtt', 'disconnected', 'gone')
+
+    texts = []
+    for container in root.floats:
+        for window in walk(container.content):
+            if isinstance(window, Window) and hasattr(window.content, 'text'):
+                value = window.content.text
+                if callable(value):
+                    try:
+                        value = value()
+                    except Exception:
+                        continue
+                if isinstance(value, list):
+                    # Fragments carry a mouse handler as a third item.
+                    value = ''.join(fragment[1] for fragment in value)
+                if isinstance(value, str):
+                    texts.append(value)
+
+    hint = ' '.join(texts)
+    assert 'F4' in hint, 'the dialog never mentions the F4 shortcut'
+    assert 'Tab' in hint and 'Enter' in hint, \
+        'the dialog does not say how to reach and press its buttons'
+
+
 def test_status_bar_hints_f4():
     from rttt.ui import create_status_bar
 

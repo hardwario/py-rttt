@@ -91,7 +91,11 @@ class Console:
         self.app = Application(
             layout=Layout(root_container, focused_element=self.input_field),
             key_bindings=bindings,
-            mouse_support=Condition(lambda: not self.state.is_show_all()),
+            # Mouse reporting stays off in the split view so the terminal's own
+            # selection keeps working, but an overlay with buttons has to be
+            # clickable whatever view is underneath it.
+            mouse_support=Condition(
+                lambda: not self.state.is_show_all() or bool(self.state.conn_down())),
             full_screen=True,
             refresh_interval=1,
             enable_page_navigation_bindings=True,
@@ -101,6 +105,13 @@ class Console:
                 'message': 'bg:#bbee88 #222222',
                 'statusbar': 'noreverse bg:gray #000000',
                 'progress-bar.used': 'bg:#4488cc',
+                # Without these the overlay's buttons look identical whether
+                # they hold the focus or not, so there is no way to tell what
+                # Enter would press.
+                'button': '#eeeeee',
+                'button.focused': 'bg:#4488cc #ffffff bold',
+                'button.arrow': 'bold',
+                'conn-hint': '#888888',
             }, priority=Priority.MOST_PRECISE)
         )
 

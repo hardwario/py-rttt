@@ -261,9 +261,11 @@ def create_layout(state, history_file):
     auto_reconnect_button.handler = toggle_auto_reconnect
     state.auto_reconnect_button = auto_reconnect_button
 
+    reconnect_button = Button('Reconnect', handler=lambda: state.reconnect(), width=13)
+    state.reconnect_button = reconnect_button
+
     # Same treatment as a flash failure: a dropped transport otherwise looks
-    # exactly like a device that has nothing to say. Reachable with Tab, so the
-    # buttons work for anyone who does not spot the F4 hint.
+    # exactly like a device that has nothing to say.
     conn_overlay = Float(
         content=ConditionalContainer(
             content=Box(
@@ -278,10 +280,20 @@ def create_layout(state, history_file):
                         ),
                         Window(height=1),
                         VSplit([
-                            Button('Reconnect', handler=lambda: state.reconnect(), width=13),
+                            reconnect_button,
                             Window(width=2),
                             auto_reconnect_button,
                         ], align=WindowAlign.CENTER, padding=1),
+                        # F4 is the way in: the buttons need focusing before
+                        # Enter reaches them, which nothing about them shows.
+                        Window(
+                            FormattedTextControl(lambda: [(
+                                'class:conn-hint',
+                                '<F4> reconnect   |   click, or <Tab> then <Enter>',
+                            )]),
+                            height=1,
+                            align=WindowAlign.CENTER,
+                        ),
                     ]),
                     title="Connection",
                 ),
