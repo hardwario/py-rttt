@@ -16,18 +16,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Install code style checker
-        run: pip install pycodestyle
+      - name: Install code style checkers
+        run: pip install pycodestyle pyflakes
 
       - name: Check code style
         run: pycodestyle --ignore=E501 rttt
+
+      - name: Check for unused imports and undefined names
+        run: pyflakes rttt
 
   test_build:
     needs: codestyle
@@ -43,10 +46,10 @@ jobs:
           - '3.14'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: "Set up Python ${{ matrix.python-version }}"
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -59,6 +62,9 @@ jobs:
 
       - name: Update Poetry configuration
         run: poetry config virtualenvs.create false
+
+      - name: Check that poetry.lock matches pyproject.toml
+        run: poetry check --lock
 
       - name: Install dependencies
         run: poetry sync --no-interaction
