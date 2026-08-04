@@ -39,20 +39,16 @@ def test_state_tracks_sources_independently():
     assert state.conn_down() == ['rtt']
 
 
-def test_status_bar_shows_disconnected_sources():
+def test_status_bar_carries_no_disconnect_indicator():
+    # The overlay holds for the whole outage, so the bar does not repeat it.
     from rttt.ui import create_status_bar
 
     state = State()
-    bar = create_status_bar(state)
-    # reach the text callable the bar renders
-    control = bar.content.children[0].content
-    assert 'DISCONNECTED' not in ''.join(t for _, t in control.text())
-
     state.set_conn('rtt', 'disconnected', 'gone')
-    rendered = control.text()
-    assert any('RTT DISCONNECTED' in t for _, t in rendered)
-    # rendered in an attention colour, not the plain title style
-    assert any('DISCONNECTED' in t and style != 'class:title' for style, t in rendered)
+    bar = create_status_bar(state)
+    control = bar.content.children[0].content
+
+    assert 'DISCONNECTED' not in ''.join(t for _, t in control.text())
 
 
 def test_file_log_records_conn_transitions(tmp_path):

@@ -155,10 +155,8 @@ def create_status_bar(state):
             ('class:title', ' <F10> Exit (or Ctrl-<F10>) '),
             ('class:title', ' [Shift-]<Tab> Cycle '),
         ]
-        # A dropped transport otherwise looks exactly like an idle device, so
-        # keep it on the bar rather than in a line that scrolls away.
-        for source in state.conn_down():
-            items.append(('fg:#ff4444 bold', f' {source.upper()} DISCONNECTED '))
+        # No disconnect indicator here: the overlay stays up for as long as the
+        # transport is down, so a second copy on the bar is just noise.
         return items
 
     def get_statusbar_time():
