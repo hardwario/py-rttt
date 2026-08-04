@@ -640,7 +640,15 @@ class MCPMiddleware(AsyncMiddleware):
                                 "error": f"Invalid address: {address!r} (use hex like 0x20004000, or \"auto\")"}
 
             def _do():
-                conn.stop()
+                # Same shape as the connector's own reconnect: stopping here is
+                # only so a start can follow, and rtt_start cannot succeed over
+                # a stale connection to the target.
+                conn.stop(report=False)
+                if getattr(conn, 'device', None):
+                    try:
+                        conn._reopen_jlink()
+                    except Exception as e:
+                        logger.warning(f'Reconnect: reopening the probe failed: {e}')
                 conn.start()
 
             return await middleware._run_target_op(_do, timeout=30.0)
