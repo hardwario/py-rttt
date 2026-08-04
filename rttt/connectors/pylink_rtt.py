@@ -51,6 +51,36 @@ class PyLinkRTTConnector(Connector):
         self._op_lock = threading.Lock()
         # None until the first CONN event, so the initial connect is reported.
         self._conn_up = None
+        # Set while the session is down because someone asked for it, as
+        # opposed to having dropped. Keeps automatic retries off a session the
+        # caller wants stopped -- see suspend().
+        self._suspended = False
+
+    @property
+    def is_suspended(self):
+        """True while the session is down on purpose rather than by failure."""
+        return self._suspended
+
+    def suspend(self, status='stopped'):
+        """Stop the session and keep it stopped.
+
+        For callers that want the session down and expect it to stay down: an
+        MCP `stop`, or a `jlink_close` handing the probe to nrfjprog. Without
+        this the watchdog treats the stop like a dropped link and reattaches
+        within reconnect_interval, taking the probe straight back.
+
+        Args:
+            status: what to report -- 'stopped' when the probe is still held,
+                'released' once it has been given up. Neither is a
+                'disconnected', which is reserved for a link that failed.
+        """
+        self._suspended = True
+        self.stop(report=False)
+        self._emit_conn(False, status=status)
+
+    def resume(self):
+        """Allow automatic reattaching again, without attaching right now."""
+        self._suspended = False
 
     def request_reconnect(self):
         """Ask for an immediate re-attach.
@@ -58,7 +88,11 @@ class PyLinkRTTConnector(Connector):
         Returns at once: the work happens on the watchdog thread, so a UI
         calling this from a key handler or a button is never blocked for the
         seconds an attach can take.
+
+        Asked for outright, so it also lifts a suspend: this is the way back
+        from a session someone stopped on purpose.
         """
+        self._suspended = False
         self._reconnect_now.set()
 
     def _reconnect_watchdog(self):
@@ -75,6 +109,11 @@ class PyLinkRTTConnector(Connector):
 
             if requested:
                 self._reconnect_now.clear()
+            elif self._suspended:
+                # Down because someone asked for it. Reattaching here would
+                # take back a probe that was handed to another tool, and put
+                # back a session the caller wants stopped.
+                continue
             elif not (self.auto_reconnect and self._conn_up is False):
                 continue
             else:
@@ -150,16 +189,24 @@ class PyLinkRTTConnector(Connector):
             # that cannot measure VTref and always reports 0 never trips this.
             self._emit_conn(False, f'Target has no power (VTref {voltage} mV)')
 
-    def _emit_conn(self, up, error=''):
+    def _emit_conn(self, up, error='', status=None):
         """Emit a CONN event, but only when the state actually changed.
 
         The read task retries a dead link every cycle, so emitting per failure
         would flood the console and the log file.
+
+        Args:
+            status: overrides the reported status, for a session that went down
+                on purpose ('stopped', 'released'). A caller passing one always
+                gets its event: suspending an already-down session still has to
+                say which of the two it now is.
         """
-        if self._conn_up is up:
+        if self._conn_up is up and status is None:
             return
         self._conn_up = up
-        self._emit(conn_event(CONN_SOURCE, 'connected' if up else 'disconnected', error))
+        if status is None:
+            status = 'connected' if up else 'disconnected'
+        self._emit(conn_event(CONN_SOURCE, status, error))
 
     @staticmethod
     def _descriptor_name(desc):
