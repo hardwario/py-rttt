@@ -3,6 +3,7 @@ import hashlib
 import os
 import socket
 import tempfile
+import time
 from collections import deque
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
@@ -75,6 +76,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._log_event = asyncio.Event()
         self._flash_events = []
         self._conn = {}
+        self._conn_event = asyncio.Event()
         self._flash_done = None
         self._flash_activity = None
         self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
@@ -237,6 +239,7 @@ class MCPMiddleware(AsyncMiddleware):
             data = event.data
             self._conn[data.get("source", "")] = {"status": data.get("status", ""),
                                                   "error": data.get("error", "")}
+            self._conn_event.set()
         elif event.type == EventType.FLASH:
             # skip per-sector progress events — hundreds of them per flash
             if event.data.get("status") != "progress":
@@ -520,11 +523,21 @@ class MCPMiddleware(AsyncMiddleware):
         def status() -> dict:
             """Get session statistics and transport connection state.
 
-            `connections` maps each transport (e.g. "rtt") to its current
-            status. Check it when output stops arriving or a command returns
-            nothing: a disconnected transport means the device is unreachable,
-            not idle, so retrying or waiting will not help — call `reconnect`
-            (or reattach the probe) instead.
+            `connections` maps each transport (e.g. "rtt") to its status. Check
+            it when output stops arriving or a command returns nothing, because
+            waiting does not help a transport that is not connected:
+
+              connected     - working normally.
+              disconnected  - the link failed or the target went away. Not
+                              idle: retrying will not help. Call `reconnect`,
+                              or `wait_for_connection` if the device is
+                              expected back (a reboot, a reflash).
+              connecting    - an attach is in progress.
+              stopped       - stopped by `stop`. The probe is still held, so
+                              memory, registers and halt/go keep working.
+                              Call `start`.
+              released      - released by `jlink_close`; nothing can reach the
+                              target. Call `jlink_open`.
             """
             return {
                 "terminal_total": middleware._terminal_cursor,
@@ -534,6 +547,49 @@ class MCPMiddleware(AsyncMiddleware):
                 "buffer_size": middleware.max_lines,
                 "connections": dict(middleware._conn),
             }
+
+        @self._mcp.tool()
+        async def wait_for_connection(timeout: float = 30.0, source: str = "rtt") -> dict:
+            """Wait until a transport is connected.
+
+            Use after anything that takes the device away for a while — a
+            reflash, a power cycle, a reset that reboots into a new firmware —
+            instead of polling `status` or sleeping a guessed interval.
+
+            Returns as soon as the transport is connected. On timeout it
+            reports the state it is stuck in and why, so the answer says what
+            to do next rather than just that the wait failed.
+
+            Args:
+                timeout: Max seconds to wait.
+                source: Transport to watch, "rtt" unless a bridge added others.
+            """
+            started = time.monotonic()
+
+            def state():
+                return middleware._conn.get(source, {})
+
+            while True:
+                if state().get("status") == "connected":
+                    return {"status": "ok", "connected": True,
+                            "elapsed": round(time.monotonic() - started, 2)}
+
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    current = state()
+                    return {
+                        "status": "timeout",
+                        "connected": False,
+                        "state": current.get("status", "unknown"),
+                        "error": current.get("error", ""),
+                        "elapsed": round(time.monotonic() - started, 2),
+                    }
+
+                middleware._conn_event.clear()
+                try:
+                    await asyncio.wait_for(middleware._conn_event.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    pass
 
         @self._mcp.tool()
         async def flash(file_path: str, addr: int = 0) -> dict:
@@ -665,7 +721,9 @@ class MCPMiddleware(AsyncMiddleware):
 
             def _do():
                 was_reading = conn.is_running
-                conn.stop()
+                # suspend(), not stop(): auto reconnect would otherwise put the
+                # session back within reconnect_interval.
+                conn.suspend()
                 return {"was_reading": was_reading}
 
             return await middleware._run_target_op(_do, timeout=30.0)
@@ -680,6 +738,7 @@ class MCPMiddleware(AsyncMiddleware):
             conn = middleware._leaf()
 
             def _do():
+                conn.resume()
                 if conn.is_running:
                     return {"already_reading": True}
                 conn.start()
@@ -701,7 +760,9 @@ class MCPMiddleware(AsyncMiddleware):
 
             def _do():
                 was_reading = conn.is_running
-                conn.stop()
+                # Reported as 'released' rather than 'stopped': the probe is
+                # gone too, so nothing here can reach the target at all.
+                conn.suspend(status='released')
                 conn.jlink.close()
                 return {"was_reading": was_reading}
 
@@ -719,6 +780,7 @@ class MCPMiddleware(AsyncMiddleware):
                 if not getattr(conn, 'device', None):
                     return {"status": "error",
                             "error": "No device configured, cannot reopen the probe"}
+                conn.resume()
                 conn._reopen_jlink()
                 if not conn.is_running:
                     conn.start()
