@@ -14,10 +14,15 @@ CONN_SOURCE = 'rtt'
 class PyLinkRTTConnector(Connector):
 
     def __init__(self, jlink: pylink.JLink, terminal_buffer=0, logger_buffer=1, latency=50, block_address=None,
-                 flash_cmd=None, device=None, serial=None, speed=None, write_timeout=2.0) -> None:
+                 flash_cmd=None, device=None, serial=None, speed=None, write_timeout=2.0,
+                 power_check_interval=1.0, min_target_voltage=1000) -> None:
         super().__init__()
         self.jlink = jlink
         self.write_timeout = write_timeout
+        self.power_check_interval = power_check_interval
+        self.min_target_voltage = min_target_voltage
+        self._next_power_check = 0.0
+        self._seen_target_power = False
         self.block_address = block_address
         self.rtt_read_delay = latency / 1000.0
         self.is_running = False
@@ -40,6 +45,36 @@ class PyLinkRTTConnector(Connector):
         self._op_lock = threading.Lock()
         # None until the first CONN event, so the initial connect is reported.
         self._conn_up = None
+
+    def _check_target_power(self):
+        """Report a target that lost power, using the probe's measured VTref.
+
+        Needed because a silent link is unreadable from rtt_read alone: on an
+        unpowered board it returns nothing rather than failing, which is
+        indistinguishable from a device that simply has nothing to say.
+
+        Only ever reports a disconnect. Power coming back does not mean the
+        session works again — the firmware reboots and the old RTT control
+        block is stale — so recovery is left to arriving data or an explicit
+        reconnect.
+        """
+        now = time.monotonic()
+        if now < self._next_power_check:
+            return
+        self._next_power_check = now + self.power_check_interval
+
+        try:
+            voltage = self.jlink.hardware_status.VTarget
+        except Exception as e:
+            self._emit_conn(False, f'J-Link: {e}')
+            return
+
+        if voltage >= self.min_target_voltage:
+            self._seen_target_power = True
+        elif self._seen_target_power:
+            # Only trusted once a healthy reading has been seen, so a probe
+            # that cannot measure VTref and always reports 0 never trips this.
+            self._emit_conn(False, f'Target has no power (VTref {voltage} mV)')
 
     def _emit_conn(self, up, error=''):
         """Emit a CONN event, but only when the state actually changed.
@@ -282,6 +317,10 @@ class PyLinkRTTConnector(Connector):
                 time.sleep(0.005)
                 continue
             total += written
+
+        # A write that landed is proof the link works, so it clears a stale
+        # disconnect that empty reads alone can never clear.
+        self._emit_conn(True)
         return True
 
     def flash(self, file_path: str, addr: int = 0):
@@ -492,6 +531,7 @@ class PyLinkRTTConnector(Connector):
                 (self.logger_buffer, self.log_up_size, EventType.LOG)
             ]
             failure = None
+            got_data = False
             for idx, num_bytes, event_type in channels:
                 if idx is None:
                     continue
@@ -501,6 +541,7 @@ class PyLinkRTTConnector(Connector):
                     except pylink.errors.JLinkException as e:
                         raise Exception(f'J-Link: {e}') from e
                     if data:
+                        got_data = True
                         lines = bytes(data).decode('utf-8', errors="backslashreplace")
                         if lines:
                             lines = self._cache[idx] + lines
@@ -522,10 +563,18 @@ class PyLinkRTTConnector(Connector):
                     failure = e
                     logger.error(f'Error reading RTT buffer {idx}: {e}')
 
-            # One verdict per cycle, so a buffer that reads fine while another
-            # fails cannot flip the state back and forth. Skipped while
-            # stopping, where stop() reports the disconnect itself.
             if self.is_running:
-                self._emit_conn(failure is None, str(failure) if failure else '')
+                # A read that returns nothing is not evidence of a live target:
+                # on an unpowered board rtt_read does not fail, it just comes
+                # back empty, exactly like an idle device. So only real data
+                # clears a disconnect — otherwise the empty reads that follow a
+                # failed write would immediately undo it and the warning would
+                # merely blink.
+                if failure is not None:
+                    self._emit_conn(False, str(failure))
+                elif got_data:
+                    self._emit_conn(True)
+                else:
+                    self._check_target_power()
 
             time.sleep(self.rtt_read_delay)

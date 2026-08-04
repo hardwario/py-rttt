@@ -14,6 +14,11 @@ class FakeBufDesc:
         self.name = name
 
 
+class FakeHardwareStatus:
+    def __init__(self, vtarget):
+        self.VTarget = vtarget
+
+
 class FakeJLink:
     """Minimal stand-in for pylink.JLink driving PyLinkRTTConnector."""
 
@@ -52,6 +57,8 @@ class FakeJLink:
         self.flash_progress_actions = ['Compare', 'Program', 'Verify']
         # names[(index, up)] -> buffer name reported by the descriptor
         self.names = {}
+        # measured target supply voltage in mV, as the probe reports it
+        self.vtarget = 3300
 
     def _next_size(self, key):
         seq = self.sizes[key]
@@ -74,6 +81,13 @@ class FakeJLink:
 
     def rtt_read(self, index, num_bytes):
         return []
+
+    def rtt_write(self, index, data):
+        return len(data)
+
+    @property
+    def hardware_status(self):
+        return FakeHardwareStatus(self.vtarget)
 
     def reset(self, ms=0, halt=True):
         self.calls.append(('reset', halt))
@@ -549,13 +563,103 @@ def test_conn_disconnect_and_recovery_from_read_task():
     assert len(down) == 1, conn_events(events)
     assert 'Cannot read from target' in down[0]['error']
 
-    jlink.rtt_read = lambda index, num_bytes: []
+    # Only real data proves the link is back — see the empty-read test below.
+    jlink.rtt_read = lambda index, num_bytes: list(b'hello\n') if index == 0 else []
     time.sleep(0.3)
     stop_read_thread(conn)
 
-    # down and up reported once each, despite many read cycles either side
     assert [e['status'] for e in conn_events(events)] == [
         'connected', 'disconnected', 'connected']
+
+
+def test_empty_reads_do_not_clear_a_disconnect():
+    # Reported from hardware: the warning only blinked. rtt_read on an
+    # unpowered target does not fail, it returns nothing, so treating a
+    # quiet cycle as proof of life undid the disconnect immediately.
+    import pylink as pylink_mod
+
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+
+    def dead_write(index, data):
+        raise pylink_mod.errors.JLinkException('Unspecified error.')
+
+    jlink.rtt_write = dead_write
+    conn.handle(Event(EventType.IN, 'help'))
+    assert [e['status'] for e in conn_events(events)][-1] == 'disconnected'
+
+    # reads keep coming back empty, as they do on a dead target
+    time.sleep(0.4)
+    stop_read_thread(conn)
+
+    assert [e['status'] for e in conn_events(events)] == ['connected', 'disconnected']
+
+
+def test_successful_write_clears_a_disconnect():
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    stop_read_thread(conn)
+
+    conn._emit_conn(False, 'stale')
+    conn.handle(Event(EventType.IN, 'help'))
+
+    assert [e['status'] for e in conn_events(events)] == [
+        'connected', 'disconnected', 'connected']
+
+
+def test_target_power_loss_detected_without_any_write():
+    # VTref drops when the board loses power, which is the only signal
+    # available while reads are merely silent.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, power_check_interval=0.0, min_target_voltage=1000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.start()
+
+    jlink.vtarget = 0
+    time.sleep(0.3)
+    stop_read_thread(conn)
+
+    down = [e.data for e in events
+            if e.type == EventType.CONN and e.data['status'] == 'disconnected']
+    assert len(down) == 1, [e.data for e in events if e.type == EventType.CONN]
+    assert 'no power' in down[0]['error']
+    assert 'VTref 0 mV' in down[0]['error']
+
+
+def test_probe_that_cannot_measure_vref_never_reports_power_loss():
+    # Some probes always report 0 mV; that must not look like a dead target.
+    jlink = FakeJLink()
+    jlink.vtarget = 0
+    conn = PyLinkRTTConnector(jlink, power_check_interval=0.0, min_target_voltage=1000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.start()
+    time.sleep(0.3)
+    stop_read_thread(conn)
+
+    assert [e.data['status'] for e in events if e.type == EventType.CONN] == ['connected']
+
+
+def test_target_power_recovery_needs_more_than_voltage():
+    # Power returning means the firmware rebooted, so the old RTT control
+    # block is stale; the session must not silently claim to be back.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, power_check_interval=0.0, min_target_voltage=1000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.start()
+
+    jlink.vtarget = 0
+    time.sleep(0.25)
+    jlink.vtarget = 3300
+    time.sleep(0.25)
+    stop_read_thread(conn)
+
+    assert [e.data['status'] for e in events if e.type == EventType.CONN] == [
+        'connected', 'disconnected']
 
 
 def test_conn_stays_quiet_while_healthy():
