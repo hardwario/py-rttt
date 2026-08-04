@@ -22,6 +22,7 @@ class Console:
         self.connector = connector
         self.state = State()
         self.exception = None
+        self._wire_reconnect()
 
         if history_file:
             d = os.path.dirname(history_file)
@@ -49,6 +50,10 @@ class Console:
                     event.app.clipboard.set_data(data)
                 except Exception as e:
                     logger.error(e)
+
+        @bindings.add("f4", eager=True)
+        def _(event):
+            self.state.reconnect()
 
         @bindings.add("f5", eager=True)
         def _(event):
@@ -86,7 +91,11 @@ class Console:
         self.app = Application(
             layout=Layout(root_container, focused_element=self.input_field),
             key_bindings=bindings,
-            mouse_support=Condition(lambda: not self.state.is_show_all()),
+            # Mouse reporting stays off in the split view so the terminal's own
+            # selection keeps working, but an overlay with buttons has to be
+            # clickable whatever view is underneath it.
+            mouse_support=Condition(
+                lambda: not self.state.is_show_all() or bool(self.state.conn_down())),
             full_screen=True,
             refresh_interval=1,
             enable_page_navigation_bindings=True,
@@ -96,6 +105,13 @@ class Console:
                 'message': 'bg:#bbee88 #222222',
                 'statusbar': 'noreverse bg:gray #000000',
                 'progress-bar.used': 'bg:#4488cc',
+                # Without these the overlay's buttons look identical whether
+                # they hold the focus or not, so there is no way to tell what
+                # Enter would press.
+                'button': '#eeeeee',
+                'button.focused': 'bg:#4488cc #ffffff bold',
+                'button.arrow': 'bold',
+                'conn-hint': '#888888',
             }, priority=Priority.MOST_PRECISE)
         )
 
@@ -130,6 +146,12 @@ class Console:
                         elif status == "error":
                             self.state.flash_error = data.get("message", "Flash error")
                         self.app.invalidate()
+                    elif event.type == EventType.CONN:
+                        data = event.data
+                        self.state.set_conn(data.get("source", ""),
+                                            data.get("status", ""),
+                                            data.get("error", ""))
+                        self.app.invalidate()
 
         def pre_run():
             self.events = asyncio.Queue()
@@ -137,7 +159,7 @@ class Console:
             def connector_handle_event(event: Event):
                 try:
                     self.events.put_nowait(event)
-                except Exception as e:
+                except Exception:
                     logger.exception(f"Failed to queue event: {event}")
 
             self.connector.on(connector_handle_event)
@@ -156,12 +178,47 @@ class Console:
     def has_focus(self, window):
         return self.app.layout.has_focus(window)
 
+    def _leaf(self):
+        """The connector at the end of the middleware chain, which owns the
+        transport and therefore the reconnecting."""
+        conn = self.connector
+        while hasattr(conn, 'connector'):
+            conn = conn.connector
+        return conn
+
+    def _wire_reconnect(self):
+        """Let the dialog and F4 drive the connector's reconnecting.
+
+        Both are no-ops on a connector that does not support it, rather than
+        offering a button that quietly does nothing.
+        """
+        leaf = self._leaf()
+
+        if hasattr(leaf, 'request_reconnect'):
+            self.state.on_reconnect = leaf.request_reconnect
+        else:
+            logger.info(f'{type(leaf).__name__} cannot reconnect on request')
+
+        if hasattr(leaf, 'auto_reconnect'):
+            self.state.auto_reconnect = bool(leaf.auto_reconnect)
+
+            def set_auto(enabled):
+                leaf.auto_reconnect = enabled
+
+            self.state.on_auto_reconnect = set_auto
+        else:
+            logger.info(f'{type(leaf).__name__} has no auto reconnect')
+
     def _input_accept_handler(self, buff: Buffer) -> bool:
-        with logger.catch(message='_input_accept_handler', reraise=True):
+        # Anything raised here propagates into prompt_toolkit's key processor
+        # and tears down the event loop, so a connector that fails to deliver a
+        # command must not be able to take the console with it. Connectors
+        # report delivery problems as CONN events, which the status bar shows.
+        with logger.catch(message='_input_accept_handler'):
             text = f'{buff.text}\n'
             for line in text.splitlines():
                 self.connector.handle(Event(EventType.IN, line))
-            return False  # false to keep the text in the buffer
+        return False  # false to keep the text in the buffer
 
     def _buffer_insert_text(self, buffer, line):
         changed = buffer._set_text(buffer.text + line)

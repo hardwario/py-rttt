@@ -1,13 +1,10 @@
-from prompt_toolkit.widgets import TextArea, SearchToolbar, Frame, HorizontalLine, ProgressBar, Dialog, Box, Label
+from prompt_toolkit.widgets import TextArea, SearchToolbar, Frame, HorizontalLine, ProgressBar, Box, Button
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, WindowAlign, ConditionalContainer, FloatContainer, Float
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.margins import NumberedMargin, ScrollbarMargin
 from prompt_toolkit.layout.dimension import LayoutDimension
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.layout.layout import Layout
 from datetime import datetime
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.application import get_app
 from rttt.lexer import LogLexer
 
 
@@ -27,9 +24,50 @@ class State:
         self.flash_action = ""
         self.flash_error = ""
         self.flash_bar = None
+        # transport source -> {'status': ..., 'error': ...}, from CONN events
+        self.conn = {}
+        self.auto_reconnect = False
+        # Set by Console so the dialog can reach the connector that owns the
+        # transport; no-ops when the connector does not support reconnecting.
+        self.on_reconnect = None
+        self.on_auto_reconnect = None
+        self.auto_reconnect_button = None
 
     def is_show_status_bar(self):
         return self.show_status_bar
+
+    # How a transport is named to the user; anything else falls back to its id.
+    CONN_LABELS = {'rtt': 'Device'}
+
+    def set_conn(self, source, status, error=''):
+        self.conn[source] = {'status': status, 'error': error}
+
+    def conn_down(self):
+        """Sources whose transport is not currently connected."""
+        return [s for s, v in sorted(self.conn.items()) if v.get('status') != 'connected']
+
+    def conn_title(self):
+        down = self.conn_down()
+        if not down:
+            return ''
+        labels = [self.CONN_LABELS.get(s, s.upper()) for s in down]
+        return f'{" and ".join(labels)} is not connected'
+
+    def conn_detail(self):
+        for source in self.conn_down():
+            error = self.conn.get(source, {}).get('error')
+            if error:
+                return error
+        return ''
+
+    def reconnect(self):
+        if self.on_reconnect:
+            self.on_reconnect()
+
+    def set_auto_reconnect(self, enabled):
+        self.auto_reconnect = bool(enabled)
+        if self.on_auto_reconnect:
+            self.on_auto_reconnect(self.auto_reconnect)
 
     def is_show_terminal(self):
         return self.show == self.SHOW_TERMINAL
@@ -119,14 +157,18 @@ def create_status_bar(state):
     Create the status bar for the console.
     """
     def get_statusbar_text():
-        return [
+        items = [
             ('class:title', ' HARDWARIO RTTT Console     '),
             ('class:title', ' <F3> Focus '),
+            ('class:title', ' <F4> Reconnect '),
             ('class:title', ' <F5> Pause ') if state.scroll_to_end else ('class:yellow', ' <F5> Pause '),
             ('class:title', ' <F8> Clear '),
             ('class:title', ' <F10> Exit (or Ctrl-<F10>) '),
             ('class:title', ' [Shift-]<Tab> Cycle '),
         ]
+        # No disconnect indicator here: the overlay stays up for as long as the
+        # transport is down, so a second copy on the bar is just noise.
+        return items
 
     def get_statusbar_time():
         return datetime.now().strftime('%b %d, %Y  %H:%M:%S')
@@ -204,6 +246,60 @@ def create_layout(state, history_file):
         ),
     )
 
+    def auto_reconnect_label():
+        return f'[{"x" if state.auto_reconnect else " "}] Auto reconnect'
+
+    auto_reconnect_button = Button(auto_reconnect_label(), width=22)
+
+    def toggle_auto_reconnect():
+        state.set_auto_reconnect(not state.auto_reconnect)
+        auto_reconnect_button.text = auto_reconnect_label()
+
+    auto_reconnect_button.handler = toggle_auto_reconnect
+    state.auto_reconnect_button = auto_reconnect_button
+
+    reconnect_button = Button('Reconnect', handler=lambda: state.reconnect(), width=13)
+    state.reconnect_button = reconnect_button
+
+    # Same treatment as a flash failure: a dropped transport otherwise looks
+    # exactly like a device that has nothing to say.
+    conn_overlay = Float(
+        content=ConditionalContainer(
+            content=Box(
+                body=Frame(
+                    body=HSplit([
+                        Window(FormattedTextControl(lambda: state.conn_title()), height=1,
+                               align=WindowAlign.CENTER, style="fg:#ff4444 bold"),
+                        ConditionalContainer(
+                            content=Window(FormattedTextControl(lambda: state.conn_detail()), height=1,
+                                           align=WindowAlign.CENTER),
+                            filter=Condition(lambda: bool(state.conn_detail())),
+                        ),
+                        Window(height=1),
+                        VSplit([
+                            reconnect_button,
+                            Window(width=2),
+                            auto_reconnect_button,
+                        ], align=WindowAlign.CENTER, padding=1),
+                        # F4 is the way in: the buttons need focusing before
+                        # Enter reaches them, which nothing about them shows.
+                        Window(
+                            FormattedTextControl(lambda: [(
+                                'class:conn-hint',
+                                '<F4> reconnect   |   click, or <Tab> then <Enter>',
+                            )]),
+                            height=1,
+                            align=WindowAlign.CENTER,
+                        ),
+                    ]),
+                    title="Connection",
+                ),
+                style="bg:#222222 fg:#eeeeee",
+            ),
+            filter=Condition(lambda: bool(state.conn_down())),
+        ),
+    )
+
     root_container = FloatContainer(
         content=HSplit(
             [
@@ -226,7 +322,7 @@ def create_layout(state, history_file):
                 status_bar
             ]
         ),
-        floats=[flash_overlay],
+        floats=[flash_overlay, conn_overlay],
         style="bg:#111111 fg:#eeeeee",
     )
 

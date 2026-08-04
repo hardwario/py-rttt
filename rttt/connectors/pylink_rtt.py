@@ -6,29 +6,198 @@ import time
 import threading
 from loguru import logger
 from rttt.connectors.base import Connector
-from rttt.event import Event, EventType
+from rttt.event import Event, EventType, conn_event
+
+CONN_SOURCE = 'rtt'
 
 
 class PyLinkRTTConnector(Connector):
 
     def __init__(self, jlink: pylink.JLink, terminal_buffer=0, logger_buffer=1, latency=50, block_address=None,
-                 flash_cmd=None, device=None, serial=None, speed=None) -> None:
+                 flash_cmd=None, device=None, serial=None, speed=None, write_timeout=2.0,
+                 power_check_interval=1.0, min_target_voltage=1000,
+                 auto_reconnect=False, reconnect_interval=3.0) -> None:
         super().__init__()
         self.jlink = jlink
+        self.write_timeout = write_timeout
+        self.power_check_interval = power_check_interval
+        self.min_target_voltage = min_target_voltage
+        self._next_power_check = 0.0
+        self._seen_target_power = False
+        self.auto_reconnect = auto_reconnect
+        self.reconnect_interval = reconnect_interval
+        self._watchdog = None
+        self._watchdog_stop = threading.Event()
+        self._reconnect_now = threading.Event()
         self.block_address = block_address
         self.rtt_read_delay = latency / 1000.0
         self.is_running = False
         self.thread = None
-        self.terminal_buffer = terminal_buffer
+        # terminal_buffer and logger_buffer accept an index or a buffer name.
+        # Names are resolved against the up descriptors on every start(), so a
+        # reflash that moves the buffers is picked up; the public attributes
+        # stay indices either way.
+        self._terminal_spec = terminal_buffer
+        self._logger_spec = logger_buffer
+        self.terminal_buffer = terminal_buffer if isinstance(terminal_buffer, int) else 0
         self.terminal_buffer_up_size = 0
         self.terminal_buffer_down_size = 0
-        self.logger_buffer = logger_buffer
+        self.logger_buffer = logger_buffer if isinstance(logger_buffer, int) else 1
         self.log_up_size = 0
         self.flash_cmd = flash_cmd
         self.device = device
         self.serial = serial
         self.speed = speed
         self._op_lock = threading.Lock()
+        # None until the first CONN event, so the initial connect is reported.
+        self._conn_up = None
+
+    def request_reconnect(self):
+        """Ask for an immediate re-attach.
+
+        Returns at once: the work happens on the watchdog thread, so a UI
+        calling this from a key handler or a button is never blocked for the
+        seconds an attach can take.
+        """
+        self._reconnect_now.set()
+
+    def _reconnect_watchdog(self):
+        """Re-attach RTT on request, or while auto_reconnect is on and down.
+
+        Runs on its own thread because reattaching means stop() then start(),
+        and stop() joins the read thread — driving that from the read thread
+        itself would deadlock.
+        """
+        while not self._watchdog_stop.is_set():
+            requested = self._reconnect_now.wait(self.reconnect_interval)
+            if self._watchdog_stop.is_set():
+                break
+
+            if requested:
+                self._reconnect_now.clear()
+            elif not (self.auto_reconnect and self._conn_up is False):
+                continue
+            else:
+                # Automatic retries stay off the probe while the board has no
+                # power: the attach cannot succeed and each attempt takes
+                # seconds. An explicit request is still honoured, so asking
+                # for it gets a real answer rather than silence.
+                if self._seen_target_power:
+                    try:
+                        if self.jlink.hardware_status.VTarget < self.min_target_voltage:
+                            continue
+                    except Exception:
+                        continue
+
+            if not self._op_lock.acquire(blocking=False):
+                continue
+            try:
+                logger.info('Re-attaching RTT')
+                try:
+                    self.stop(report=False)
+                except Exception as e:
+                    logger.warning(f'Reconnect: stop failed: {e}')
+                try:
+                    # rtt_start() on its own is not enough once the target has
+                    # dropped: the DLL keeps its connection to a device that is
+                    # no longer there and every attach fails with 'Unspecified
+                    # error'. Re-establishing it first is what makes the retry
+                    # able to succeed. Needs the device, so a connector built
+                    # without one can only try the plain attach.
+                    if self.device:
+                        # Failing here means there is nothing to attach to --
+                        # an unpowered target, or the probe held elsewhere. The
+                        # control block search would spend its full 15s timeout
+                        # proving that, holding _op_lock against an explicit
+                        # request all the while, so report and wait instead.
+                        self._reopen_jlink()
+                    self.start()
+                except Exception as e:
+                    # start() reports nothing on failure, so keep the console's
+                    # warning accurate and try again on the next tick.
+                    logger.warning(f'Reconnect: attach failed: {e}')
+                    self._emit_conn(False, f'Reconnecting failed: {e}')
+            finally:
+                self._op_lock.release()
+
+    def _check_target_power(self):
+        """Report a target that lost power, using the probe's measured VTref.
+
+        Needed because a silent link is unreadable from rtt_read alone: on an
+        unpowered board it returns nothing rather than failing, which is
+        indistinguishable from a device that simply has nothing to say.
+
+        Only ever reports a disconnect. Power coming back does not mean the
+        session works again — the firmware reboots and the old RTT control
+        block is stale — so recovery is left to arriving data or an explicit
+        reconnect.
+        """
+        now = time.monotonic()
+        if now < self._next_power_check:
+            return
+        self._next_power_check = now + self.power_check_interval
+
+        try:
+            voltage = self.jlink.hardware_status.VTarget
+        except Exception as e:
+            self._emit_conn(False, f'J-Link: {e}')
+            return
+
+        if voltage >= self.min_target_voltage:
+            self._seen_target_power = True
+        elif self._seen_target_power:
+            # Only trusted once a healthy reading has been seen, so a probe
+            # that cannot measure VTref and always reports 0 never trips this.
+            self._emit_conn(False, f'Target has no power (VTref {voltage} mV)')
+
+    def _emit_conn(self, up, error=''):
+        """Emit a CONN event, but only when the state actually changed.
+
+        The read task retries a dead link every cycle, so emitting per failure
+        would flood the console and the log file.
+        """
+        if self._conn_up is up:
+            return
+        self._conn_up = up
+        self._emit(conn_event(CONN_SOURCE, 'connected' if up else 'disconnected', error))
+
+    @staticmethod
+    def _descriptor_name(desc):
+        """Buffer name from a descriptor, tolerating undecodable bytes."""
+        try:
+            return desc.name
+        except UnicodeDecodeError:
+            return desc.acName.decode('utf-8', errors='replace')
+
+    def _resolve_buffer_names(self, num_up):
+        """Map any buffer given by name onto its index.
+
+        Returns False when a requested name is not present yet. Buffers
+        register one by one during boot, so the caller treats that like an
+        uninitialized control block and retries.
+        """
+        names = None
+        for attr, spec in (('terminal_buffer', self._terminal_spec),
+                           ('logger_buffer', self._logger_spec)):
+            if not isinstance(spec, str):
+                continue
+
+            if names is None:
+                names = {}
+                for i in range(num_up):
+                    try:
+                        names[self._descriptor_name(self.jlink.rtt_get_buf_descriptor(i, 1))] = i
+                    except pylink.errors.JLinkException:
+                        break
+
+            if spec not in names:
+                logger.info(f'RTT buffer {spec!r} not registered yet, retrying search...')
+                return False
+
+            setattr(self, attr, names[spec])
+            logger.info(f'RTT buffer {spec!r} resolved to index {names[spec]}')
+
+        return True
 
     def start(self):
         """Start RTT and the read thread."""
@@ -59,8 +228,10 @@ class PyLinkRTTConnector(Connector):
                 except pylink.errors.JLinkException as e:
                     raise Exception(f'J-Link: {e}') from e
 
+            resolved = num_up is not None and self._resolve_buffer_names(num_up)
+
             attached = False
-            while num_up is not None and num_up > self.terminal_buffer:
+            while resolved and num_up > self.terminal_buffer:
                 # The firmware registers RTT buffers one by one during boot
                 # (terminal first, logger later), so wait until both report
                 # a non-zero size — attaching in between leaves the logger
@@ -119,10 +290,7 @@ class PyLinkRTTConnector(Connector):
 
         for i in range(num_up):
             desc = self.jlink.rtt_get_buf_descriptor(i, 1)
-            try:
-                name = desc.name
-            except UnicodeDecodeError:
-                name = desc.acName.decode('utf-8', errors='replace')
+            name = self._descriptor_name(desc)
             logger.info(f'Up buffer {i}: {name} <Index={desc.BufferIndex}, Size={desc.SizeOfBuffer}>')
             if i == self.terminal_buffer:
                 self.terminal_buffer_up_size = desc.SizeOfBuffer
@@ -130,30 +298,37 @@ class PyLinkRTTConnector(Connector):
                 self.log_up_size = desc.SizeOfBuffer
         for i in range(num_down):
             desc = self.jlink.rtt_get_buf_descriptor(i, 0)
-            try:
-                name = desc.name
-            except UnicodeDecodeError:
-                name = desc.acName.decode('utf-8', errors='replace')
+            name = self._descriptor_name(desc)
             logger.info(f'Down buffer {i}: {name} <Index={desc.BufferIndex}, Size={desc.SizeOfBuffer}>')
             if i == self.terminal_buffer:
                 self.terminal_buffer_down_size = desc.SizeOfBuffer
 
         self.thread = threading.Thread(target=self._read_task, daemon=True)
         self.thread.start()
+        self._emit_conn(True)
 
     def reset(self, halt=False):
         """Reset the target. Restarts the RTT session unless halting."""
         was_running = self.is_running
         if was_running:
-            self.stop()
+            # Halting leaves the session down for real; a plain reset restarts
+            # it below, so that gap is not a disconnect worth reporting.
+            self.stop(report=halt)
         try:
             self.jlink.reset(ms=10, halt=halt)
         finally:
             if was_running and not halt:
                 self.start()
 
-    def stop(self):
-        """Stop the read thread and RTT."""
+    def stop(self, report=True):
+        """Stop the read thread and RTT.
+
+        report=False keeps the transport state as it was, for callers that stop
+        only to start again: reporting the intermediate state makes the console
+        flash a disconnect warning on every reconnect, and tells the watchdog
+        the link is down again — which had it tearing down and re-attaching a
+        working session about once a second.
+        """
         if not self.is_running:
             return
         self.is_running = False
@@ -161,16 +336,38 @@ class PyLinkRTTConnector(Connector):
             self.thread.join()
             self.thread = None
         self.jlink.rtt_stop()
+        if report:
+            self._emit_conn(False)
 
     def open(self):
         super().open()
-        self.start()
+
+        self._watchdog_stop.clear()
+        self._watchdog = threading.Thread(target=self._reconnect_watchdog, daemon=True)
+        self._watchdog.start()
+
+        try:
+            self.start()
+        except Exception as e:
+            if not self.auto_reconnect:
+                self._watchdog_stop.set()
+                raise
+            # With auto reconnect asked for, a target that is not there yet is
+            # not a startup failure: come up disconnected and let the watchdog
+            # attach once it appears.
+            logger.warning(f'RTT not available yet: {e}')
+            self._emit_conn(False, str(e))
+
         self._emit(Event(EventType.OPEN, ''))
         logger.info('RTT opened')
 
     def close(self):
         super().close()
         logger.info('Closing RTT')
+        self._watchdog_stop.set()
+        if self._watchdog:
+            self._watchdog.join(timeout=self.reconnect_interval + 1.0)
+            self._watchdog = None
         self.stop()
         self._emit(Event(EventType.CLOSE, ''))
         logger.info('RTT closed')
@@ -178,25 +375,57 @@ class PyLinkRTTConnector(Connector):
     def handle(self, event: Event):
         logger.info(f'handle: {event.type} {event.data}')
         if event.type == EventType.IN:
-            logger.info(f'RTT write shell buffer {self.terminal_buffer} buffer size {self.terminal_buffer_down_size}')
-            if not self.terminal_buffer_down_size:
-                raise Exception(f'Shell buffer DOWN {self.terminal_buffer} has zero size')
-            data = bytearray(f'{event.data}\n', "utf-8")
-            total = 0
-            while total < len(data):
-                chunk = data[total:total + self.terminal_buffer_down_size]
-                try:
-                    written = self.jlink.rtt_write(self.terminal_buffer, list(chunk))
-                except pylink.errors.JLinkException as e:
-                    raise Exception(f'J-Link: {e}') from e
-                if written <= 0:
-                    time.sleep(0.005)
-                    continue
-                total += written
+            if not self._write_line(event.data):
+                # The command never reached the target, so do not echo it back
+                # as if it had been sent.
+                return
         elif event.type == EventType.FLASH:
             self.flash(event.data.get('file'), event.data.get('addr', 0))
             return
         self._emit(event)
+
+    def _write_line(self, line):
+        """Write one line to the down buffer. Returns False if it did not go out.
+
+        Never raises. handle() runs on the console's key-handler thread, where
+        an exception tears down the whole prompt_toolkit event loop — sending a
+        command to an unpowered target used to kill the console outright.
+        """
+        logger.info(f'RTT write shell buffer {self.terminal_buffer} buffer size {self.terminal_buffer_down_size}')
+
+        if not self.terminal_buffer_down_size:
+            # Not a dropped link: the buffer exists but the firmware never
+            # sized it, which `reconnect` recovers from. Reads may be fine, so
+            # this must not claim the transport is down.
+            logger.error(f'Shell buffer DOWN {self.terminal_buffer} has zero size')
+            return False
+
+        data = bytearray(f'{line}\n', "utf-8")
+        total = 0
+        deadline = time.monotonic() + self.write_timeout
+        while total < len(data):
+            chunk = data[total:total + self.terminal_buffer_down_size]
+            try:
+                written = self.jlink.rtt_write(self.terminal_buffer, list(chunk))
+            except pylink.errors.JLinkException as e:
+                logger.error(f'RTT write failed: {e}')
+                self._emit_conn(False, f'J-Link: {e}')
+                return False
+            if written <= 0:
+                # A target that stops draining the buffer would otherwise spin
+                # here forever, freezing the console on its own key handler.
+                if time.monotonic() >= deadline:
+                    logger.error('RTT write timed out, target is not reading the shell buffer')
+                    self._emit_conn(False, 'Target is not reading the shell buffer')
+                    return False
+                time.sleep(0.005)
+                continue
+            total += written
+
+        # A write that landed is proof the link works, so it clears a stale
+        # disconnect that empty reads alone can never clear.
+        self._emit_conn(True)
+        return True
 
     def flash(self, file_path: str, addr: int = 0):
         """Flash firmware file to device. Stops RTT, flashes, restarts RTT."""
@@ -405,6 +634,8 @@ class PyLinkRTTConnector(Connector):
                 (self.terminal_buffer, self.terminal_buffer_up_size, EventType.OUT),
                 (self.logger_buffer, self.log_up_size, EventType.LOG)
             ]
+            failure = None
+            got_data = False
             for idx, num_bytes, event_type in channels:
                 if idx is None:
                     continue
@@ -414,6 +645,7 @@ class PyLinkRTTConnector(Connector):
                     except pylink.errors.JLinkException as e:
                         raise Exception(f'J-Link: {e}') from e
                     if data:
+                        got_data = True
                         lines = bytes(data).decode('utf-8', errors="backslashreplace")
                         if lines:
                             lines = self._cache[idx] + lines
@@ -432,5 +664,21 @@ class PyLinkRTTConnector(Connector):
 
                                 self._emit(Event(event_type, line))
                 except Exception as e:
+                    failure = e
                     logger.error(f'Error reading RTT buffer {idx}: {e}')
+
+            if self.is_running:
+                # A read that returns nothing is not evidence of a live target:
+                # on an unpowered board rtt_read does not fail, it just comes
+                # back empty, exactly like an idle device. So only real data
+                # clears a disconnect — otherwise the empty reads that follow a
+                # failed write would immediately undo it and the warning would
+                # merely blink.
+                if failure is not None:
+                    self._emit_conn(False, str(failure))
+                elif got_data:
+                    self._emit_conn(True)
+                else:
+                    self._check_target_power()
+
             time.sleep(self.rtt_read_delay)

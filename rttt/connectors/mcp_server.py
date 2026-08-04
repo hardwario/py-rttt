@@ -74,6 +74,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._terminal_event = asyncio.Event()
         self._log_event = asyncio.Event()
         self._flash_events = []
+        self._conn = {}
         self._flash_done = None
         self._flash_activity = None
         self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
@@ -232,6 +233,10 @@ class MCPMiddleware(AsyncMiddleware):
             self._log_lines.append(event.data)
             self._log_cursor += 1
             self._log_event.set()
+        elif event.type == EventType.CONN:
+            data = event.data
+            self._conn[data.get("source", "")] = {"status": data.get("status", ""),
+                                                  "error": data.get("error", "")}
         elif event.type == EventType.FLASH:
             # skip per-sector progress events — hundreds of them per flash
             if event.data.get("status") != "progress":
@@ -513,13 +518,21 @@ class MCPMiddleware(AsyncMiddleware):
 
         @self._mcp.tool()
         def status() -> dict:
-            """Get session statistics: total and buffered terminal/log line counts and current cursors."""
+            """Get session statistics and transport connection state.
+
+            `connections` maps each transport (e.g. "rtt") to its current
+            status. Check it when output stops arriving or a command returns
+            nothing: a disconnected transport means the device is unreachable,
+            not idle, so retrying or waiting will not help — call `reconnect`
+            (or reattach the probe) instead.
+            """
             return {
                 "terminal_total": middleware._terminal_cursor,
                 "terminal_buffered": len(middleware._terminal_lines),
                 "log_total": middleware._log_cursor,
                 "log_buffered": len(middleware._log_lines),
                 "buffer_size": middleware.max_lines,
+                "connections": dict(middleware._conn),
             }
 
         @self._mcp.tool()
@@ -627,8 +640,89 @@ class MCPMiddleware(AsyncMiddleware):
                                 "error": f"Invalid address: {address!r} (use hex like 0x20004000, or \"auto\")"}
 
             def _do():
-                conn.stop()
+                # Same shape as the connector's own reconnect: stopping here is
+                # only so a start can follow, and rtt_start cannot succeed over
+                # a stale connection to the target.
+                conn.stop(report=False)
+                if getattr(conn, 'device', None):
+                    try:
+                        conn._reopen_jlink()
+                    except Exception as e:
+                        logger.warning(f'Reconnect: reopening the probe failed: {e}')
                 conn.start()
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def stop() -> dict:
+            """Stop reading the device's RTT, keeping the probe held.
+
+            No output arrives while stopped and commands cannot be sent. The
+            firmware keeps running. Call `start` to read again, or
+            `jlink_close` to also give the probe up.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                was_reading = conn.is_running
+                conn.stop()
+                return {"was_reading": was_reading}
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def start() -> dict:
+            """Start reading the device's RTT again after `stop`.
+
+            Use `reconnect` instead when the session is running but stuck: that
+            one also re-establishes the connection to the target.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                if conn.is_running:
+                    return {"already_reading": True}
+                conn.start()
+                return {"already_reading": False}
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def jlink_close() -> dict:
+            """Release the J-Link so another tool can use it.
+
+            Only one process can hold a probe at a time, so an external
+            `nrfjprog`, `JLinkExe` or `west flash` needs this first. Stops RTT
+            on the way out; call `jlink_open` to take the probe back.
+
+            Does not touch the firmware — it keeps running.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                was_reading = conn.is_running
+                conn.stop()
+                conn.jlink.close()
+                return {"was_reading": was_reading}
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def jlink_open() -> dict:
+            """Take the J-Link back after `jlink_close` and start reading RTT.
+
+            Fails while another process still holds the probe.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                if not getattr(conn, 'device', None):
+                    return {"status": "error",
+                            "error": "No device configured, cannot reopen the probe"}
+                conn._reopen_jlink()
+                if not conn.is_running:
+                    conn.start()
+                return {"reading": conn.is_running}
 
             return await middleware._run_target_op(_do, timeout=30.0)
 

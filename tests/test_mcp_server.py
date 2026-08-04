@@ -6,7 +6,7 @@ import time
 import pytest
 from rttt.connectors.base import Connector
 from rttt.connectors.mcp_server import MCPMiddleware, _hexdump, _BearerAuthMiddleware
-from rttt.event import Event, EventType
+from rttt.event import Event, EventType, conn_event
 
 
 class FakeConnector(Connector):
@@ -380,3 +380,170 @@ def test_close_releases_port():
     s = socket.socket()
     s.bind(('127.0.0.1', port))
     s.close()
+
+
+def test_status_reports_connection_state():
+    m, _ = make_middleware()
+
+    async def run():
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        # nothing seen yet
+        assert result['connections'] == {}
+
+        await m._process(conn_event('rtt', 'disconnected', 'Cannot read from target'))
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        assert result['connections'] == {
+            'rtt': {'status': 'disconnected', 'error': 'Cannot read from target'}}
+
+        await m._process(conn_event('rtt', 'connected'))
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        assert result['connections']['rtt']['status'] == 'connected'
+
+    asyncio.run(run())
+
+
+def test_status_tracks_sources_independently():
+    # An MQTT bridge over an RTT connector: one dropping must not mask the other.
+    m, _ = make_middleware()
+
+    async def run():
+        await m._process(conn_event('rtt', 'connected'))
+        await m._process(conn_event('mqtt', 'disconnected', 'not authorised'))
+        result = tool_result(await m._mcp.call_tool('status', {}))
+        assert result['connections']['rtt']['status'] == 'connected'
+        assert result['connections']['mqtt']['status'] == 'disconnected'
+        assert result['connections']['mqtt']['error'] == 'not authorised'
+
+    asyncio.run(run())
+
+
+class FakeRTTConnector(FakeConnector):
+    """A connector with the RTT session surface the start/stop tools drive."""
+
+    class _JLink:
+        def __init__(self, owner):
+            self._owner = owner
+
+        def close(self):
+            self._owner.calls.append('jlink_close')
+
+    def __init__(self, device='NRF9151_XXCA'):
+        super().__init__()
+        self.calls = []
+        self.is_running = True
+        self.device = device
+        self.serial = 1234
+        self.speed = 2000
+        self.jlink = self._JLink(self)
+
+    def stop(self, report=True):
+        self.calls.append(('stop', report))
+        self.is_running = False
+
+    def start(self):
+        self.calls.append('start')
+        self.is_running = True
+
+    def _reopen_jlink(self):
+        self.calls.append('reopen')
+
+
+def make_rtt_middleware(**kwargs):
+    conn = FakeRTTConnector(**kwargs)
+    return MCPMiddleware(conn, listen='127.0.0.1:0'), conn
+
+
+def test_stop_keeps_the_probe_so_memory_stays_readable():
+    # Stopping RTT must not give the probe up: reading registers and memory
+    # over a stopped RTT session is a normal thing to want.
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        result = tool_result(await m._mcp.call_tool('stop', {}))
+        assert result['status'] == 'ok'
+        assert result['was_reading'] is True
+        assert conn.is_running is False
+        assert 'jlink_close' not in conn.calls, 'stop released the probe'
+
+    asyncio.run(run())
+
+
+def test_stop_reports_the_disconnect():
+    # Unlike the stop inside a reconnect, this one leaves RTT down, so the
+    # console has to show it.
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        await m._mcp.call_tool('stop', {})
+        assert ('stop', True) in conn.calls, 'stop hid a real disconnect'
+
+    asyncio.run(run())
+
+
+def test_start_resumes_reading():
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        await m._mcp.call_tool('stop', {})
+        conn.calls.clear()
+
+        result = tool_result(await m._mcp.call_tool('start', {}))
+        assert result['already_reading'] is False
+        assert conn.is_running is True
+        assert 'start' in conn.calls
+        # Plain start does not reopen: that is reconnect's and jlink_open's job.
+        assert 'reopen' not in conn.calls
+
+    asyncio.run(run())
+
+
+def test_start_on_a_live_session_is_a_no_op():
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        result = tool_result(await m._mcp.call_tool('start', {}))
+        assert result['already_reading'] is True
+        assert conn.calls == [], 'a live session was torn down anyway'
+
+    asyncio.run(run())
+
+
+def test_jlink_close_releases_the_probe():
+    # Only one process can hold a J-Link, so an external nrfjprog cannot get in
+    # until this actually closes it.
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        result = tool_result(await m._mcp.call_tool('jlink_close', {}))
+        assert result['status'] == 'ok'
+        assert result['was_reading'] is True
+        assert conn.is_running is False
+        assert 'jlink_close' in conn.calls, 'the probe was left held'
+
+    asyncio.run(run())
+
+
+def test_jlink_open_takes_the_probe_back_and_reads_again():
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        await m._mcp.call_tool('jlink_close', {})
+        conn.calls.clear()
+
+        result = tool_result(await m._mcp.call_tool('jlink_open', {}))
+        assert result['status'] == 'ok'
+        assert result['reading'] is True
+        # Reopening has to precede the attach, or it rescues nothing.
+        assert conn.calls.index('reopen') < conn.calls.index('start')
+
+    asyncio.run(run())
+
+
+def test_jlink_open_without_a_device_says_so():
+    m, _ = make_rtt_middleware(device=None)
+
+    async def run():
+        result = tool_result(await m._mcp.call_tool('jlink_open', {}))
+        assert 'No device configured' in result.get('error', '')
+
+    asyncio.run(run())
