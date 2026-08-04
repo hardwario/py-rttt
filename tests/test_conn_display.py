@@ -75,3 +75,35 @@ def test_file_log_records_conn_transitions(tmp_path):
     assert 'rtt disconnected: Cannot read from target' in body
     # timestamped like every other logged line, so history shows when it dropped
     assert any(line.split(' @ ')[0].strip() and ' @ ' in line for line in body.splitlines())
+
+
+def test_conn_overlay_wording():
+    state = State()
+    assert state.conn_title() == ''
+    assert state.conn_detail() == ''
+
+    state.set_conn('rtt', 'disconnected', 'J-Link: Unspecified error.')
+    assert state.conn_title() == 'Device is not connected'
+    assert state.conn_detail() == 'J-Link: Unspecified error.'
+
+    state.set_conn('rtt', 'connected')
+    assert state.conn_title() == ''
+
+    # unknown transports fall back to their id
+    state.set_conn('mqtt', 'disconnected', 'not authorised')
+    assert state.conn_title() == 'MQTT is not connected'
+
+
+def test_conn_overlay_visible_only_while_down():
+    from rttt.ui import create_layout
+
+    state = State()
+    root, _, _, _ = create_layout(state, None)
+    overlay = root.floats[-1].content
+    assert not overlay.filter()
+
+    state.set_conn('rtt', 'disconnected', 'boom')
+    assert overlay.filter()
+
+    state.set_conn('rtt', 'connected')
+    assert not overlay.filter()

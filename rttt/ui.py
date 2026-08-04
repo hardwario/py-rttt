@@ -33,12 +33,29 @@ class State:
     def is_show_status_bar(self):
         return self.show_status_bar
 
+    # How a transport is named to the user; anything else falls back to its id.
+    CONN_LABELS = {'rtt': 'Device'}
+
     def set_conn(self, source, status, error=''):
         self.conn[source] = {'status': status, 'error': error}
 
     def conn_down(self):
         """Sources whose transport is not currently connected."""
         return [s for s, v in sorted(self.conn.items()) if v.get('status') != 'connected']
+
+    def conn_title(self):
+        down = self.conn_down()
+        if not down:
+            return ''
+        labels = [self.CONN_LABELS.get(s, s.upper()) for s in down]
+        return f'{" and ".join(labels)} is not connected'
+
+    def conn_detail(self):
+        for source in self.conn_down():
+            error = self.conn.get(source, {}).get('error')
+            if error:
+                return error
+        return ''
 
     def is_show_terminal(self):
         return self.show == self.SHOW_TERMINAL
@@ -218,6 +235,29 @@ def create_layout(state, history_file):
         ),
     )
 
+    # Same treatment as a flash failure: a dropped transport otherwise looks
+    # exactly like a device that has nothing to say.
+    conn_overlay = Float(
+        content=ConditionalContainer(
+            content=Box(
+                body=Frame(
+                    body=HSplit([
+                        Window(FormattedTextControl(lambda: state.conn_title()), height=1,
+                               align=WindowAlign.CENTER, style="fg:#ff4444 bold"),
+                        ConditionalContainer(
+                            content=Window(FormattedTextControl(lambda: state.conn_detail()), height=1,
+                                           align=WindowAlign.CENTER),
+                            filter=Condition(lambda: bool(state.conn_detail())),
+                        ),
+                    ]),
+                    title="Connection",
+                ),
+                style="bg:#222222 fg:#eeeeee",
+            ),
+            filter=Condition(lambda: bool(state.conn_down())),
+        ),
+    )
+
     root_container = FloatContainer(
         content=HSplit(
             [
@@ -240,7 +280,7 @@ def create_layout(state, history_file):
                 status_bar
             ]
         ),
-        floats=[flash_overlay],
+        floats=[flash_overlay, conn_overlay],
         style="bg:#111111 fg:#eeeeee",
     )
 

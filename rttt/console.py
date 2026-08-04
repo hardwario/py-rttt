@@ -163,11 +163,15 @@ class Console:
         return self.app.layout.has_focus(window)
 
     def _input_accept_handler(self, buff: Buffer) -> bool:
-        with logger.catch(message='_input_accept_handler', reraise=True):
+        # Anything raised here propagates into prompt_toolkit's key processor
+        # and tears down the event loop, so a connector that fails to deliver a
+        # command must not be able to take the console with it. Connectors
+        # report delivery problems as CONN events, which the status bar shows.
+        with logger.catch(message='_input_accept_handler'):
             text = f'{buff.text}\n'
             for line in text.splitlines():
                 self.connector.handle(Event(EventType.IN, line))
-            return False  # false to keep the text in the buffer
+        return False  # false to keep the text in the buffer
 
     def _buffer_insert_text(self, buffer, line):
         changed = buffer._set_text(buffer.text + line)

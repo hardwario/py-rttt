@@ -1,9 +1,10 @@
 import time
+import threading
 import os
 import pytest
 import rttt.connectors.pylink_rtt as pylink_rtt_module
 from rttt.connectors.pylink_rtt import PyLinkRTTConnector
-from rttt.event import EventType
+from rttt.event import Event, EventType
 
 
 class FakeBufDesc:
@@ -565,3 +566,83 @@ def test_conn_stays_quiet_while_healthy():
     stop_read_thread(conn)
 
     assert [e['status'] for e in conn_events(events)] == ['connected']
+
+
+def test_write_to_dead_link_does_not_raise():
+    # Reported from hardware: unplug the device, send a command, and the
+    # exception used to escape into prompt_toolkit and kill the event loop.
+    import pylink as pylink_mod
+
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    stop_read_thread(conn)
+
+    def dead_write(index, data):
+        raise pylink_mod.errors.JLinkException('Unspecified error.')
+
+    jlink.rtt_write = dead_write
+    conn.handle(Event(EventType.IN, 'help'))   # must not raise
+
+    down = [e for e in conn_events(events) if e['status'] == 'disconnected']
+    assert len(down) == 1
+    assert 'Unspecified error.' in down[0]['error']
+    # the command never went out, so it must not be echoed as sent
+    assert not [e for e in events if e.type == EventType.IN]
+
+
+def test_write_times_out_instead_of_spinning_forever():
+    # A target that stops draining the buffer made rtt_write return 0 forever;
+    # the old loop spun on the console's own key-handler thread.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, write_timeout=0.2)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.start()
+    stop_read_thread(conn)
+
+    jlink.rtt_write = lambda index, data: 0
+
+    # Run it on a thread with a watchdog: without the deadline handle() never
+    # returns, and a hanging test is far worse than a failing one.
+    done = threading.Event()
+
+    def send():
+        conn.handle(Event(EventType.IN, 'help'))
+        done.set()
+
+    worker = threading.Thread(target=send, daemon=True)
+    worker.start()
+    assert done.wait(timeout=5.0), 'write never gave up — it is spinning forever'
+    down = [e.data for e in events if e.type == EventType.CONN and e.data['status'] == 'disconnected']
+    assert len(down) == 1
+    assert 'not reading' in down[0]['error']
+
+
+def test_write_with_zero_sized_down_buffer_does_not_raise():
+    # Buffer present but never sized by the firmware: recoverable via
+    # reconnect, and not a dropped link, so no CONN event.
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    stop_read_thread(conn)
+    conn.terminal_buffer_down_size = 0
+
+    conn.handle(Event(EventType.IN, 'help'))   # must not raise
+
+    assert not [e for e in events if e.type == EventType.IN]
+    assert [e.data['status'] for e in events if e.type == EventType.CONN] == ['connected']
+
+
+def test_successful_write_still_echoes():
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    stop_read_thread(conn)
+
+    written = []
+    jlink.rtt_write = lambda index, data: (written.append(bytes(data)), len(data))[1]
+    conn.handle(Event(EventType.IN, 'help'))
+
+    assert b'help\n' in b''.join(written)
+    assert [e.data for e in events if e.type == EventType.IN] == ['help']
