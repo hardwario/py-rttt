@@ -337,3 +337,49 @@ def test_status_bar_hints_f4():
     state = State()
     control = create_status_bar(state).content.children[0].content
     assert any('<F4> Reconnect' in t for _, t in control.text())
+
+
+def test_a_stopped_session_is_not_reported_as_a_fault():
+    # `stop` from MCP is deliberate, so the red 'is not connected' warning
+    # would be telling the user their device broke when it did not.
+    state = State()
+    state.set_conn('rtt', 'stopped')
+
+    assert 'not connected' not in state.conn_title().lower(), \
+        f'a deliberate stop reads as a failure: {state.conn_title()!r}'
+    assert state.conn_title(), 'a stopped session says nothing at all'
+
+
+def test_a_stopped_session_says_how_to_resume():
+    state = State()
+    state.set_conn('rtt', 'stopped')
+    text = f'{state.conn_title()} {state.conn_detail()}'.lower()
+    assert 'start' in text, f'nothing tells the user how to resume: {text!r}'
+
+
+def test_a_released_probe_says_so():
+    state = State()
+    state.set_conn('rtt', 'released')
+    text = f'{state.conn_title()} {state.conn_detail()}'.lower()
+    assert 'probe' in text or 'released' in text, \
+        f'a released probe is not explained: {text!r}'
+
+
+def test_a_real_disconnect_still_reads_as_a_fault():
+    state = State()
+    state.set_conn('rtt', 'disconnected', 'Target has no power (VTref 0 mV)')
+
+    assert 'not connected' in state.conn_title().lower()
+    assert 'VTref' in state.conn_detail()
+
+
+def test_the_overlay_shows_for_stopped_and_disconnected_alike():
+    # Both are states the user needs to see; only the wording differs.
+    for status in ('disconnected', 'stopped', 'released'):
+        state = State()
+        state.set_conn('rtt', status)
+        assert state.conn_down() == ['rtt'], f'{status} hid the overlay'
+
+    state = State()
+    state.set_conn('rtt', 'connected')
+    assert state.conn_down() == []
