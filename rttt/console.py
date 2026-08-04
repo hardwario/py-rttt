@@ -22,6 +22,7 @@ class Console:
         self.connector = connector
         self.state = State()
         self.exception = None
+        self._wire_reconnect()
 
         if history_file:
             d = os.path.dirname(history_file)
@@ -52,17 +53,7 @@ class Console:
 
         @bindings.add("f4", eager=True)
         def _(event):
-            self.state.auto_reconnect = not self.state.auto_reconnect
-            # The retry lives on the connector that owns the transport, which
-            # is at the end of the middleware chain.
-            leaf = self.connector
-            while hasattr(leaf, 'connector'):
-                leaf = leaf.connector
-            if hasattr(leaf, 'auto_reconnect'):
-                leaf.auto_reconnect = self.state.auto_reconnect
-            else:
-                logger.warning(f'{type(leaf).__name__} does not support auto reconnect')
-                self.state.auto_reconnect = False
+            self.state.reconnect()
 
         @bindings.add("f5", eager=True)
         def _(event):
@@ -175,6 +166,37 @@ class Console:
 
     def has_focus(self, window):
         return self.app.layout.has_focus(window)
+
+    def _leaf(self):
+        """The connector at the end of the middleware chain, which owns the
+        transport and therefore the reconnecting."""
+        conn = self.connector
+        while hasattr(conn, 'connector'):
+            conn = conn.connector
+        return conn
+
+    def _wire_reconnect(self):
+        """Let the dialog and F4 drive the connector's reconnecting.
+
+        Both are no-ops on a connector that does not support it, rather than
+        offering a button that quietly does nothing.
+        """
+        leaf = self._leaf()
+
+        if hasattr(leaf, 'request_reconnect'):
+            self.state.on_reconnect = leaf.request_reconnect
+        else:
+            logger.info(f'{type(leaf).__name__} cannot reconnect on request')
+
+        if hasattr(leaf, 'auto_reconnect'):
+            self.state.auto_reconnect = bool(leaf.auto_reconnect)
+
+            def set_auto(enabled):
+                leaf.auto_reconnect = enabled
+
+            self.state.on_auto_reconnect = set_auto
+        else:
+            logger.info(f'{type(leaf).__name__} has no auto reconnect')
 
     def _input_accept_handler(self, buff: Buffer) -> bool:
         # Anything raised here propagates into prompt_toolkit's key processor

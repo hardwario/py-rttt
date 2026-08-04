@@ -192,7 +192,7 @@ def test_overlay_appears_without_any_command_being_sent():
             leaf.thread.join()
 
 
-def test_f4_toggles_the_checkbox_and_reaches_the_leaf_connector():
+def _console_with_leaf(**kwargs):
     import sys
     sys.path.insert(0, 'tests')
     from test_pylink_rtt import FakeJLink
@@ -200,35 +200,61 @@ def test_f4_toggles_the_checkbox_and_reaches_the_leaf_connector():
     from rttt.connectors.substitution import SubstitutionMiddleware
     from rttt.console import Console
 
-    leaf = PyLinkRTTConnector(FakeJLink())
-    console = Console(SubstitutionMiddleware(leaf))
+    leaf = PyLinkRTTConnector(FakeJLink(), **kwargs)
+    return Console(SubstitutionMiddleware(leaf)), leaf
 
-    # find the F4 handler the way prompt_toolkit would
-    handler = None
-    for binding in console.app.key_bindings.bindings:
-        if any(getattr(k, 'name', str(k)) == 'f4' or str(k).endswith('F4') for k in binding.keys):
-            handler = binding.handler
+
+def _binding(console, key):
+    for b in console.app.key_bindings.bindings:
+        if any(getattr(k, 'name', str(k)).lower().endswith(key) for k in b.keys):
+            return b.handler
+    return None
+
+
+def test_f4_asks_for_an_immediate_reconnect():
+    console, leaf = _console_with_leaf()
+    handler = _binding(console, 'f4')
     assert handler is not None, 'F4 is not bound'
 
+    assert not leaf._reconnect_now.is_set()
+    handler(None)
+    assert leaf._reconnect_now.is_set(), 'F4 did not reach the connector'
+
+
+def test_dialog_reconnect_button_asks_the_connector():
+    console, leaf = _console_with_leaf()
+    assert not leaf._reconnect_now.is_set()
+    console.state.reconnect()
+    assert leaf._reconnect_now.is_set()
+
+
+def test_dialog_checkbox_toggles_auto_reconnect_on_the_connector():
+    console, leaf = _console_with_leaf()
+    button = console.state.auto_reconnect_button
+
     assert console.state.auto_reconnect is False
     assert leaf.auto_reconnect is False
+    assert '[ ] Auto reconnect' in button.text
 
-    handler(None)
+    button.handler()
     assert console.state.auto_reconnect is True
-    assert leaf.auto_reconnect is True, 'the flag never reached the leaf connector'
+    assert leaf.auto_reconnect is True, 'the flag never reached the connector'
+    assert '[x] Auto reconnect' in button.text
 
-    handler(None)
-    assert console.state.auto_reconnect is False
+    button.handler()
     assert leaf.auto_reconnect is False
+    assert '[ ] Auto reconnect' in button.text
 
 
-def test_status_bar_shows_the_reconnect_checkbox():
+def test_checkbox_starts_ticked_when_the_cli_asked_for_it():
+    console, leaf = _console_with_leaf(auto_reconnect=True)
+    assert console.state.auto_reconnect is True
+    assert '[x] Auto reconnect' in console.state.auto_reconnect_button.text
+
+
+def test_status_bar_hints_f4():
     from rttt.ui import create_status_bar
 
     state = State()
-    bar = create_status_bar(state)
-    control = bar.content.children[0].content
-
-    assert any('<F4> Reconnect [ ]' in t for _, t in control.text())
-    state.auto_reconnect = True
-    assert any('<F4> Reconnect [x]' in t for _, t in control.text())
+    control = create_status_bar(state).content.children[0].content
+    assert any('<F4> Reconnect' in t for _, t in control.text())

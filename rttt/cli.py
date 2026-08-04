@@ -55,6 +55,7 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--terminal-buffer', type=int, help='RTT Terminal buffer index.', show_default=True, default=0)
 @click.option('--logger-buffer', type=int, help='RTT Logger buffer index.', show_default=True, default=1)
 @click.option('--latency', type=int, help='Latency for RTT readout in ms.', show_default=True, default=50)
+@click.option('--auto-reconnect', is_flag=True, help='Keep re-attaching RTT while the target is unreachable, and start even if it is not there yet.')
 @click.option('--history-file', type=click.Path(writable=True), show_default=True, default=DEFAULT_HISTORY_FILE)
 @click.option('--console-file', type=click.Path(writable=True), show_default=True, default=DEFAULT_CONSOLE_FILE)
 @click.option('--mcp/--no-mcp', is_flag=True, help='Enable MCP server.', show_default=True, default=False)
@@ -64,7 +65,7 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--trust-shells', is_flag=True, default=False, help='Trust shell substitutions in config without interactive prompt (for CI/scripts).')
 @click.option('--headless', is_flag=True, default=False, help='Run without the interactive console, MCP server only (requires --mcp).')
 @click.pass_obj
-def cli(app: CliContext, serial, device, speed, reset, flash_cmd, address, terminal_buffer, logger_buffer, latency, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
+def cli(app: CliContext, serial, device, speed, reset, flash_cmd, address, terminal_buffer, logger_buffer, latency, auto_reconnect, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     if headless and not mcp:
@@ -120,7 +121,8 @@ def cli(app: CliContext, serial, device, speed, reset, flash_cmd, address, termi
         time.sleep(1)
 
     connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address,
-                                   flash_cmd=flash_cmd, device=device, serial=serial, speed=speed)
+                                   flash_cmd=flash_cmd, device=device, serial=serial, speed=speed,
+                                   auto_reconnect=auto_reconnect)
 
     if substitutions:
         connector = SubstitutionMiddleware(connector, substitutions=app.config.get('substitutions'))

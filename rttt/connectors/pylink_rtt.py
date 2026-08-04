@@ -28,6 +28,7 @@ class PyLinkRTTConnector(Connector):
         self.reconnect_interval = reconnect_interval
         self._watchdog = None
         self._watchdog_stop = threading.Event()
+        self._reconnect_now = threading.Event()
         self.block_address = block_address
         self.rtt_read_delay = latency / 1000.0
         self.is_running = False
@@ -51,40 +52,57 @@ class PyLinkRTTConnector(Connector):
         # None until the first CONN event, so the initial connect is reported.
         self._conn_up = None
 
+    def request_reconnect(self):
+        """Ask for an immediate re-attach.
+
+        Returns at once: the work happens on the watchdog thread, so a UI
+        calling this from a key handler or a button is never blocked for the
+        seconds an attach can take.
+        """
+        self._reconnect_now.set()
+
     def _reconnect_watchdog(self):
-        """Re-attach RTT while auto_reconnect is on and the link is down.
+        """Re-attach RTT on request, or while auto_reconnect is on and down.
 
         Runs on its own thread because reattaching means stop() then start(),
         and stop() joins the read thread — driving that from the read thread
         itself would deadlock.
         """
-        while not self._watchdog_stop.wait(self.reconnect_interval):
-            if not self.auto_reconnect or self._conn_up is not False:
-                continue
+        while not self._watchdog_stop.is_set():
+            requested = self._reconnect_now.wait(self.reconnect_interval)
+            if self._watchdog_stop.is_set():
+                break
 
-            # Do not fight for the probe while the board has no power: the
-            # attach cannot succeed and each attempt takes seconds.
-            if self._seen_target_power:
-                try:
-                    if self.jlink.hardware_status.VTarget < self.min_target_voltage:
+            if requested:
+                self._reconnect_now.clear()
+            elif not (self.auto_reconnect and self._conn_up is False):
+                continue
+            else:
+                # Automatic retries stay off the probe while the board has no
+                # power: the attach cannot succeed and each attempt takes
+                # seconds. An explicit request is still honoured, so asking
+                # for it gets a real answer rather than silence.
+                if self._seen_target_power:
+                    try:
+                        if self.jlink.hardware_status.VTarget < self.min_target_voltage:
+                            continue
+                    except Exception:
                         continue
-                except Exception:
-                    continue
 
             if not self._op_lock.acquire(blocking=False):
                 continue
             try:
-                logger.info('Auto reconnect: re-attaching RTT')
+                logger.info('Re-attaching RTT')
                 try:
                     self.stop()
                 except Exception as e:
-                    logger.warning(f'Auto reconnect: stop failed: {e}')
+                    logger.warning(f'Reconnect: stop failed: {e}')
                 try:
                     self.start()
                 except Exception as e:
                     # start() reports nothing on failure, so keep the console's
                     # warning accurate and try again on the next tick.
-                    logger.warning(f'Auto reconnect: attach failed: {e}')
+                    logger.warning(f'Reconnect: attach failed: {e}')
                     self._emit_conn(False, f'Reconnecting failed: {e}')
             finally:
                 self._op_lock.release()
@@ -300,10 +318,23 @@ class PyLinkRTTConnector(Connector):
 
     def open(self):
         super().open()
-        self.start()
+
         self._watchdog_stop.clear()
         self._watchdog = threading.Thread(target=self._reconnect_watchdog, daemon=True)
         self._watchdog.start()
+
+        try:
+            self.start()
+        except Exception as e:
+            if not self.auto_reconnect:
+                self._watchdog_stop.set()
+                raise
+            # With auto reconnect asked for, a target that is not there yet is
+            # not a startup failure: come up disconnected and let the watchdog
+            # attach once it appears.
+            logger.warning(f'RTT not available yet: {e}')
+            self._emit_conn(False, str(e))
+
         self._emit(Event(EventType.OPEN, ''))
         logger.info('RTT opened')
 

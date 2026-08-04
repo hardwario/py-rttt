@@ -784,8 +784,59 @@ def test_auto_reconnect_reattaches_while_down():
         pylink_mod.errors.JLinkException('gone'))
     time.sleep(0.6)
 
-    # It keeps retrying rather than giving up after one go.
     assert jlink.calls.count('rtt_start') > before + 1
+    conn.close()
+
+
+def test_request_reconnect_reattaches_once_with_the_flag_off():
+    # F4 and the dialog button must work without auto reconnect being on.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=5.0, power_check_interval=0.0)
+    conn.on(lambda e: None)
+    conn.open()
+    before = jlink.calls.count('rtt_start')
+
+    conn.request_reconnect()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and jlink.calls.count('rtt_start') == before:
+        time.sleep(0.05)
+
+    assert jlink.calls.count('rtt_start') == before + 1, 'request was not honoured'
+    conn.close()
+
+
+def test_request_reconnect_returns_immediately():
+    # It runs on the watchdog, so a key handler is never blocked for the
+    # seconds an attach can take.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=5.0)
+    conn.on(lambda e: None)
+    conn.open()
+
+    started = time.monotonic()
+    conn.request_reconnect()
+    assert time.monotonic() - started < 0.05
+    conn.close()
+
+
+def test_request_reconnect_tried_even_without_target_power():
+    # Asked for explicitly, so it must give a real answer rather than silence.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=5.0, power_check_interval=0.0,
+                              min_target_voltage=1000)
+    conn.on(lambda e: None)
+    conn.open()
+    jlink.rtt_read = lambda i, n: []
+    jlink.vtarget = 0
+    time.sleep(0.2)
+    before = jlink.calls.count('rtt_start')
+
+    conn.request_reconnect()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and jlink.calls.count('rtt_start') == before:
+        time.sleep(0.05)
+
+    assert jlink.calls.count('rtt_start') == before + 1
     conn.close()
 
 
@@ -806,7 +857,6 @@ def test_auto_reconnect_does_not_deadlock_on_close():
 
 
 def test_auto_reconnect_waits_while_target_has_no_power():
-    # Attaching cannot succeed without power and each attempt costs seconds.
     jlink = FakeJLink()
     conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
                               power_check_interval=0.0, min_target_voltage=1000)
@@ -820,4 +870,39 @@ def test_auto_reconnect_waits_while_target_has_no_power():
     time.sleep(0.5)
 
     assert jlink.calls.count('rtt_start') == attaches, 'retried on an unpowered target'
+    conn.close()
+
+
+def test_open_without_rtt_fails_by_default():
+    jlink = FakeJLink()
+    jlink.sizes[(0, 1)] = [0]
+    conn = PyLinkRTTConnector(jlink)
+    conn.on(lambda e: None)
+
+    with pytest.raises(Exception, match='Failed to find RTT block'):
+        conn.open()
+
+
+def test_open_without_rtt_succeeds_with_auto_reconnect():
+    # Start the console even though the target is not there yet, and attach
+    # once it appears.
+    jlink = FakeJLink()
+    jlink.sizes[(0, 1)] = [0]
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0)
+    events = []
+    conn.on(lambda e: events.append(e))
+
+    conn.open()   # must not raise
+    assert [e.data['status'] for e in events if e.type == EventType.CONN] == ['disconnected']
+
+    # target shows up
+    jlink.sizes[(0, 1)] = [1024]
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if conn._conn_up:
+            break
+        time.sleep(0.05)
+
+    assert conn._conn_up is True, 'never attached once the target appeared'
     conn.close()

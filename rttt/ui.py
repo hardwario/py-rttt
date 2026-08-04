@@ -1,4 +1,4 @@
-from prompt_toolkit.widgets import TextArea, SearchToolbar, Frame, HorizontalLine, ProgressBar, Dialog, Box, Label
+from prompt_toolkit.widgets import TextArea, SearchToolbar, Frame, HorizontalLine, ProgressBar, Box, Button
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, WindowAlign, ConditionalContainer, FloatContainer, Float
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.margins import NumberedMargin, ScrollbarMargin
@@ -30,6 +30,11 @@ class State:
         # transport source -> {'status': ..., 'error': ...}, from CONN events
         self.conn = {}
         self.auto_reconnect = False
+        # Set by Console so the dialog can reach the connector that owns the
+        # transport; no-ops when the connector does not support reconnecting.
+        self.on_reconnect = None
+        self.on_auto_reconnect = None
+        self.auto_reconnect_button = None
 
     def is_show_status_bar(self):
         return self.show_status_bar
@@ -57,6 +62,15 @@ class State:
             if error:
                 return error
         return ''
+
+    def reconnect(self):
+        if self.on_reconnect:
+            self.on_reconnect()
+
+    def set_auto_reconnect(self, enabled):
+        self.auto_reconnect = bool(enabled)
+        if self.on_auto_reconnect:
+            self.on_auto_reconnect(self.auto_reconnect)
 
     def is_show_terminal(self):
         return self.show == self.SHOW_TERMINAL
@@ -149,7 +163,7 @@ def create_status_bar(state):
         items = [
             ('class:title', ' HARDWARIO RTTT Console     '),
             ('class:title', ' <F3> Focus '),
-            ('class:yellow', ' <F4> Reconnect [x] ') if state.auto_reconnect else ('class:title', ' <F4> Reconnect [ ] '),
+            ('class:title', ' <F4> Reconnect '),
             ('class:title', ' <F5> Pause ') if state.scroll_to_end else ('class:yellow', ' <F5> Pause '),
             ('class:title', ' <F8> Clear '),
             ('class:title', ' <F10> Exit (or Ctrl-<F10>) '),
@@ -235,8 +249,21 @@ def create_layout(state, history_file):
         ),
     )
 
+    def auto_reconnect_label():
+        return f'[{"x" if state.auto_reconnect else " "}] Auto reconnect'
+
+    auto_reconnect_button = Button(auto_reconnect_label(), width=22)
+
+    def toggle_auto_reconnect():
+        state.set_auto_reconnect(not state.auto_reconnect)
+        auto_reconnect_button.text = auto_reconnect_label()
+
+    auto_reconnect_button.handler = toggle_auto_reconnect
+    state.auto_reconnect_button = auto_reconnect_button
+
     # Same treatment as a flash failure: a dropped transport otherwise looks
-    # exactly like a device that has nothing to say.
+    # exactly like a device that has nothing to say. Reachable with Tab, so the
+    # buttons work for anyone who does not spot the F4 hint.
     conn_overlay = Float(
         content=ConditionalContainer(
             content=Box(
@@ -249,6 +276,12 @@ def create_layout(state, history_file):
                                            align=WindowAlign.CENTER),
                             filter=Condition(lambda: bool(state.conn_detail())),
                         ),
+                        Window(height=1),
+                        VSplit([
+                            Button('Reconnect', handler=lambda: state.reconnect(), width=13),
+                            Window(width=2),
+                            auto_reconnect_button,
+                        ], align=WindowAlign.CENTER, padding=1),
                     ]),
                     title="Connection",
                 ),
