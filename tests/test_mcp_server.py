@@ -440,6 +440,13 @@ class FakeRTTConnector(FakeConnector):
         self.calls.append(('stop', report))
         self.is_running = False
 
+    def suspend(self, status='stopped'):
+        self.calls.append(('suspend', status))
+        self.is_running = False
+
+    def resume(self):
+        self.calls.append('resume')
+
     def start(self):
         self.calls.append('start')
         self.is_running = True
@@ -468,14 +475,16 @@ def test_stop_keeps_the_probe_so_memory_stays_readable():
     asyncio.run(run())
 
 
-def test_stop_reports_the_disconnect():
-    # Unlike the stop inside a reconnect, this one leaves RTT down, so the
-    # console has to show it.
+def test_stop_reports_stopped_rather_than_a_failure():
+    # The session really is down, so it has to be reported -- but as something
+    # the caller asked for, not as a link that broke.
     m, conn = make_rtt_middleware()
 
     async def run():
         await m._mcp.call_tool('stop', {})
-        assert ('stop', True) in conn.calls, 'stop hid a real disconnect'
+        assert ('suspend', 'stopped') in conn.calls, 'stop reported nothing'
+        assert ('stop', True) not in conn.calls, \
+            'stop reported a disconnect, which reads as a fault'
 
     asyncio.run(run())
 
@@ -503,7 +512,10 @@ def test_start_on_a_live_session_is_a_no_op():
     async def run():
         result = tool_result(await m._mcp.call_tool('start', {}))
         assert result['already_reading'] is True
-        assert conn.calls == [], 'a live session was torn down anyway'
+        # resume() is fine on a live session -- it only clears the suspend flag.
+        # Restarting one is not.
+        assert 'start' not in conn.calls, 'a live session was torn down anyway'
+        assert not any(c[0] == 'stop' for c in conn.calls if isinstance(c, tuple))
 
     asyncio.run(run())
 
@@ -545,5 +557,111 @@ def test_jlink_open_without_a_device_says_so():
     async def run():
         result = tool_result(await m._mcp.call_tool('jlink_open', {}))
         assert 'No device configured' in result.get('error', '')
+
+    asyncio.run(run())
+
+
+def test_mcp_stop_suspends_so_auto_reconnect_leaves_it_alone():
+    # A stop that auto reconnect undoes three seconds later is not a stop.
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        await m._mcp.call_tool('stop', {})
+        assert ('suspend', 'stopped') in conn.calls, \
+            'stop used a plain stop(), which the watchdog reattaches from'
+
+    asyncio.run(run())
+
+
+def test_mcp_jlink_close_suspends_as_released():
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        await m._mcp.call_tool('jlink_close', {})
+        assert ('suspend', 'released') in conn.calls
+        assert 'jlink_close' in conn.calls
+
+    asyncio.run(run())
+
+
+def test_mcp_start_and_jlink_open_lift_the_suspend():
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        await m._mcp.call_tool('stop', {})
+        conn.calls.clear()
+        await m._mcp.call_tool('start', {})
+        assert 'resume' in conn.calls, 'start left the session suspended'
+
+        await m._mcp.call_tool('jlink_close', {})
+        conn.calls.clear()
+        await m._mcp.call_tool('jlink_open', {})
+        assert 'resume' in conn.calls, 'jlink_open left the session suspended'
+
+    asyncio.run(run())
+
+
+def test_wait_for_connection_returns_once_connected():
+    m, _ = make_middleware()
+
+    async def run():
+        await m._process(conn_event('rtt', 'disconnected', 'Target has no power'))
+
+        async def reconnect_later():
+            await asyncio.sleep(0.05)
+            await m._process(conn_event('rtt', 'connected'))
+
+        task = asyncio.create_task(reconnect_later())
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_connection', {'timeout': 3.0}))
+        await task
+
+        assert result['status'] == 'ok'
+        assert result['connected'] is True
+
+    asyncio.run(run())
+
+
+def test_wait_for_connection_returns_at_once_when_already_connected():
+    m, _ = make_middleware()
+
+    async def run():
+        await m._process(conn_event('rtt', 'connected'))
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_connection', {'timeout': 3.0}))
+        assert result['connected'] is True
+        assert result['elapsed'] < 0.5
+
+    asyncio.run(run())
+
+
+def test_wait_for_connection_timeout_says_what_is_wrong():
+    # The answer has to name the state it is stuck in, or the caller learns
+    # only that waiting did not work.
+    m, _ = make_middleware()
+
+    async def run():
+        await m._process(conn_event('rtt', 'released', ''))
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_connection', {'timeout': 0.2}))
+
+        assert result['status'] == 'timeout'
+        assert result['connected'] is False
+        assert result['state'] == 'released'
+
+    asyncio.run(run())
+
+
+def test_wait_for_connection_reports_the_disconnect_reason():
+    m, _ = make_middleware()
+
+    async def run():
+        await m._process(conn_event('rtt', 'disconnected',
+                                    'Target has no power (VTref 0 mV)'))
+        result = tool_result(await m._mcp.call_tool(
+            'wait_for_connection', {'timeout': 0.2}))
+
+        assert result['state'] == 'disconnected'
+        assert 'VTref' in result['error']
 
     asyncio.run(run())
