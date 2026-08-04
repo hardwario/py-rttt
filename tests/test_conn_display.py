@@ -107,3 +107,90 @@ def test_conn_overlay_visible_only_while_down():
 
     state.set_conn('rtt', 'connected')
     assert not overlay.filter()
+
+
+def drive_chain(jlink, **kwargs):
+    """Wire a connector through a middleware into a State, as the console does."""
+    import sys
+    sys.path.insert(0, 'tests')
+    from rttt.connectors.pylink_rtt import PyLinkRTTConnector
+    from rttt.connectors.substitution import SubstitutionMiddleware
+
+    leaf = PyLinkRTTConnector(jlink, **kwargs)
+    chain = SubstitutionMiddleware(leaf)
+    state = State()
+
+    def on_event(e):
+        if e.type == EventType.CONN:
+            state.set_conn(e.data['source'], e.data['status'], e.data['error'])
+
+    chain.on(on_event)
+    return leaf, chain, state
+
+
+def test_overlay_stays_up_while_device_is_unpowered():
+    # Reported from hardware: the dialog only blinked. Empty reads used to
+    # count as proof of life and cleared the disconnect a cycle later.
+    import time
+    import pylink as pylink_mod
+    from test_pylink_rtt import FakeJLink
+
+    jlink = FakeJLink()
+    leaf, chain, state = drive_chain(jlink, power_check_interval=0.5,
+                                     min_target_voltage=1000)
+    chain.open()
+    assert state.conn_down() == []
+
+    def dead_write(index, data):
+        raise pylink_mod.errors.JLinkException('Unspecified error.')
+
+    jlink.rtt_read = lambda i, n: []
+    jlink.rtt_write = dead_write
+    jlink.vtarget = 0
+
+    chain.handle(Event(EventType.IN, 'help'))
+    assert state.conn_down() == ['rtt']
+
+    try:
+        # many read cycles must not clear it
+        samples = []
+        for _ in range(10):
+            time.sleep(0.1)
+            samples.append(bool(state.conn_down()))
+        assert all(samples), f'overlay blinked: {samples}'
+        assert state.conn_title() == 'Device is not connected'
+    finally:
+        leaf.is_running = False
+        if leaf.thread:
+            leaf.thread.join()
+
+
+def test_overlay_appears_without_any_command_being_sent():
+    # Pull the power and type nothing: only the measured VTref can notice.
+    import time
+    from test_pylink_rtt import FakeJLink
+
+    jlink = FakeJLink()
+    leaf, chain, state = drive_chain(jlink, power_check_interval=0.2,
+                                     min_target_voltage=1000)
+    chain.open()
+    assert state.conn_down() == []
+
+    jlink.rtt_read = lambda i, n: []
+    jlink.vtarget = 0
+
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not state.conn_down():
+            time.sleep(0.05)
+
+        assert state.conn_down() == ['rtt'], 'power loss never noticed'
+        assert 'no power' in state.conn_detail()
+
+        # and it stays, rather than blinking
+        time.sleep(0.6)
+        assert state.conn_down() == ['rtt']
+    finally:
+        leaf.is_running = False
+        if leaf.thread:
+            leaf.thread.join()
