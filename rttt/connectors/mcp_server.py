@@ -654,6 +654,79 @@ class MCPMiddleware(AsyncMiddleware):
             return await middleware._run_target_op(_do, timeout=30.0)
 
         @self._mcp.tool()
+        async def stop() -> dict:
+            """Stop reading the device's RTT, keeping the probe held.
+
+            No output arrives while stopped and commands cannot be sent. The
+            firmware keeps running. Call `start` to read again, or
+            `jlink_close` to also give the probe up.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                was_reading = conn.is_running
+                conn.stop()
+                return {"was_reading": was_reading}
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def start() -> dict:
+            """Start reading the device's RTT again after `stop`.
+
+            Use `reconnect` instead when the session is running but stuck: that
+            one also re-establishes the connection to the target.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                if conn.is_running:
+                    return {"already_reading": True}
+                conn.start()
+                return {"already_reading": False}
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def jlink_close() -> dict:
+            """Release the J-Link so another tool can use it.
+
+            Only one process can hold a probe at a time, so an external
+            `nrfjprog`, `JLinkExe` or `west flash` needs this first. Stops RTT
+            on the way out; call `jlink_open` to take the probe back.
+
+            Does not touch the firmware — it keeps running.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                was_reading = conn.is_running
+                conn.stop()
+                conn.jlink.close()
+                return {"was_reading": was_reading}
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
+        async def jlink_open() -> dict:
+            """Take the J-Link back after `jlink_close` and start reading RTT.
+
+            Fails while another process still holds the probe.
+            """
+            conn = middleware._leaf()
+
+            def _do():
+                if not getattr(conn, 'device', None):
+                    return {"status": "error",
+                            "error": "No device configured, cannot reopen the probe"}
+                conn._reopen_jlink()
+                if not conn.is_running:
+                    conn.start()
+                return {"reading": conn.is_running}
+
+            return await middleware._run_target_op(_do, timeout=30.0)
+
+        @self._mcp.tool()
         async def reset(halt: bool = False) -> dict:
             """Reset the target device.
 
