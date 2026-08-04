@@ -15,7 +15,8 @@ class PyLinkRTTConnector(Connector):
 
     def __init__(self, jlink: pylink.JLink, terminal_buffer=0, logger_buffer=1, latency=50, block_address=None,
                  flash_cmd=None, device=None, serial=None, speed=None, write_timeout=2.0,
-                 power_check_interval=1.0, min_target_voltage=1000) -> None:
+                 power_check_interval=1.0, min_target_voltage=1000,
+                 auto_reconnect=False, reconnect_interval=3.0) -> None:
         super().__init__()
         self.jlink = jlink
         self.write_timeout = write_timeout
@@ -23,6 +24,10 @@ class PyLinkRTTConnector(Connector):
         self.min_target_voltage = min_target_voltage
         self._next_power_check = 0.0
         self._seen_target_power = False
+        self.auto_reconnect = auto_reconnect
+        self.reconnect_interval = reconnect_interval
+        self._watchdog = None
+        self._watchdog_stop = threading.Event()
         self.block_address = block_address
         self.rtt_read_delay = latency / 1000.0
         self.is_running = False
@@ -45,6 +50,44 @@ class PyLinkRTTConnector(Connector):
         self._op_lock = threading.Lock()
         # None until the first CONN event, so the initial connect is reported.
         self._conn_up = None
+
+    def _reconnect_watchdog(self):
+        """Re-attach RTT while auto_reconnect is on and the link is down.
+
+        Runs on its own thread because reattaching means stop() then start(),
+        and stop() joins the read thread — driving that from the read thread
+        itself would deadlock.
+        """
+        while not self._watchdog_stop.wait(self.reconnect_interval):
+            if not self.auto_reconnect or self._conn_up is not False:
+                continue
+
+            # Do not fight for the probe while the board has no power: the
+            # attach cannot succeed and each attempt takes seconds.
+            if self._seen_target_power:
+                try:
+                    if self.jlink.hardware_status.VTarget < self.min_target_voltage:
+                        continue
+                except Exception:
+                    continue
+
+            if not self._op_lock.acquire(blocking=False):
+                continue
+            try:
+                logger.info('Auto reconnect: re-attaching RTT')
+                try:
+                    self.stop()
+                except Exception as e:
+                    logger.warning(f'Auto reconnect: stop failed: {e}')
+                try:
+                    self.start()
+                except Exception as e:
+                    # start() reports nothing on failure, so keep the console's
+                    # warning accurate and try again on the next tick.
+                    logger.warning(f'Auto reconnect: attach failed: {e}')
+                    self._emit_conn(False, f'Reconnecting failed: {e}')
+            finally:
+                self._op_lock.release()
 
     def _check_target_power(self):
         """Report a target that lost power, using the probe's measured VTref.
@@ -258,12 +301,19 @@ class PyLinkRTTConnector(Connector):
     def open(self):
         super().open()
         self.start()
+        self._watchdog_stop.clear()
+        self._watchdog = threading.Thread(target=self._reconnect_watchdog, daemon=True)
+        self._watchdog.start()
         self._emit(Event(EventType.OPEN, ''))
         logger.info('RTT opened')
 
     def close(self):
         super().close()
         logger.info('Closing RTT')
+        self._watchdog_stop.set()
+        if self._watchdog:
+            self._watchdog.join(timeout=self.reconnect_interval + 1.0)
+            self._watchdog = None
         self.stop()
         self._emit(Event(EventType.CLOSE, ''))
         logger.info('RTT closed')

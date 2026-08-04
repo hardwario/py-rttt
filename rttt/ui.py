@@ -29,6 +29,7 @@ class State:
         self.flash_bar = None
         # transport source -> {'status': ..., 'error': ...}, from CONN events
         self.conn = {}
+        self.auto_reconnect = False
 
     def is_show_status_bar(self):
         return self.show_status_bar
@@ -148,6 +149,7 @@ def create_status_bar(state):
         items = [
             ('class:title', ' HARDWARIO RTTT Console     '),
             ('class:title', ' <F3> Focus '),
+            ('class:yellow', ' <F4> Reconnect [x] ') if state.auto_reconnect else ('class:title', ' <F4> Reconnect [ ] '),
             ('class:title', ' <F5> Pause ') if state.scroll_to_end else ('class:yellow', ' <F5> Pause '),
             ('class:title', ' <F8> Clear '),
             ('class:title', ' <F10> Exit (or Ctrl-<F10>) '),

@@ -50,6 +50,20 @@ class Console:
                 except Exception as e:
                     logger.error(e)
 
+        @bindings.add("f4", eager=True)
+        def _(event):
+            self.state.auto_reconnect = not self.state.auto_reconnect
+            # The retry lives on the connector that owns the transport, which
+            # is at the end of the middleware chain.
+            leaf = self.connector
+            while hasattr(leaf, 'connector'):
+                leaf = leaf.connector
+            if hasattr(leaf, 'auto_reconnect'):
+                leaf.auto_reconnect = self.state.auto_reconnect
+            else:
+                logger.warning(f'{type(leaf).__name__} does not support auto reconnect')
+                self.state.auto_reconnect = False
+
         @bindings.add("f5", eager=True)
         def _(event):
             if self.state.scroll_to_end_toggle():

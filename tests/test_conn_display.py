@@ -194,3 +194,45 @@ def test_overlay_appears_without_any_command_being_sent():
         leaf.is_running = False
         if leaf.thread:
             leaf.thread.join()
+
+
+def test_f4_toggles_the_checkbox_and_reaches_the_leaf_connector():
+    import sys
+    sys.path.insert(0, 'tests')
+    from test_pylink_rtt import FakeJLink
+    from rttt.connectors.pylink_rtt import PyLinkRTTConnector
+    from rttt.connectors.substitution import SubstitutionMiddleware
+    from rttt.console import Console
+
+    leaf = PyLinkRTTConnector(FakeJLink())
+    console = Console(SubstitutionMiddleware(leaf))
+
+    # find the F4 handler the way prompt_toolkit would
+    handler = None
+    for binding in console.app.key_bindings.bindings:
+        if any(getattr(k, 'name', str(k)) == 'f4' or str(k).endswith('F4') for k in binding.keys):
+            handler = binding.handler
+    assert handler is not None, 'F4 is not bound'
+
+    assert console.state.auto_reconnect is False
+    assert leaf.auto_reconnect is False
+
+    handler(None)
+    assert console.state.auto_reconnect is True
+    assert leaf.auto_reconnect is True, 'the flag never reached the leaf connector'
+
+    handler(None)
+    assert console.state.auto_reconnect is False
+    assert leaf.auto_reconnect is False
+
+
+def test_status_bar_shows_the_reconnect_checkbox():
+    from rttt.ui import create_status_bar
+
+    state = State()
+    bar = create_status_bar(state)
+    control = bar.content.children[0].content
+
+    assert any('<F4> Reconnect [ ]' in t for _, t in control.text())
+    state.auto_reconnect = True
+    assert any('<F4> Reconnect [x]' in t for _, t in control.text())

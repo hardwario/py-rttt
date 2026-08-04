@@ -750,3 +750,74 @@ def test_successful_write_still_echoes():
 
     assert b'help\n' in b''.join(written)
     assert [e.data for e in events if e.type == EventType.IN] == ['help']
+
+
+def test_auto_reconnect_off_by_default_does_not_reattach():
+    import pylink as pylink_mod
+
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=0.1, power_check_interval=0.0)
+    conn.on(lambda e: None)
+    conn.open()
+
+    jlink.rtt_read = lambda i, n: (_ for _ in ()).throw(
+        pylink_mod.errors.JLinkException('gone'))
+    time.sleep(0.5)
+    attaches = jlink.calls.count('rtt_start')
+    time.sleep(0.5)
+
+    assert jlink.calls.count('rtt_start') == attaches, 'reattached with the flag off'
+    conn.close()
+
+
+def test_auto_reconnect_reattaches_while_down():
+    import pylink as pylink_mod
+
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0)
+    conn.on(lambda e: None)
+    conn.open()
+    before = jlink.calls.count('rtt_start')
+
+    jlink.rtt_read = lambda i, n: (_ for _ in ()).throw(
+        pylink_mod.errors.JLinkException('gone'))
+    time.sleep(0.6)
+
+    # It keeps retrying rather than giving up after one go.
+    assert jlink.calls.count('rtt_start') > before + 1
+    conn.close()
+
+
+def test_auto_reconnect_does_not_deadlock_on_close():
+    # stop() joins the read thread, so a reattach driven from the read thread
+    # itself would deadlock; it runs on its own watchdog instead.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.05,
+                              power_check_interval=0.0)
+    conn.on(lambda e: None)
+    conn.open()
+    conn._emit_conn(False, 'forced')
+    time.sleep(0.3)
+
+    done = threading.Event()
+    threading.Thread(target=lambda: (conn.close(), done.set()), daemon=True).start()
+    assert done.wait(timeout=5.0), 'close() deadlocked against the reconnect watchdog'
+
+
+def test_auto_reconnect_waits_while_target_has_no_power():
+    # Attaching cannot succeed without power and each attempt costs seconds.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0, min_target_voltage=1000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    jlink.rtt_read = lambda i, n: []
+    jlink.vtarget = 0
+    time.sleep(0.3)
+    attaches = jlink.calls.count('rtt_start')
+    time.sleep(0.5)
+
+    assert jlink.calls.count('rtt_start') == attaches, 'retried on an unpowered target'
+    conn.close()
