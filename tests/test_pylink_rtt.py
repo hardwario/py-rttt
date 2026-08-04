@@ -858,6 +858,56 @@ def test_reconnect_reopens_the_probe_when_rtt_start_alone_fails():
         'the probe was reopened but no attach followed it'
 
 
+def test_successful_reconnect_does_not_loop_forever():
+    # The stop() inside a reconnect used to report 'disconnected', which is the
+    # very condition the watchdog reattaches on, so a working target was torn
+    # down and re-attached about once a second forever.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    conn.request_reconnect()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and jlink.calls.count('rtt_start') < 2:
+        time.sleep(0.02)
+
+    settled = jlink.calls.count('rtt_start')
+    time.sleep(0.8)
+    after = jlink.calls.count('rtt_start')
+    conn.close()
+
+    assert settled >= 2, 'the requested reconnect never ran'
+    assert after == settled, \
+        f'kept reattaching a healthy session ({after - settled} more attaches in 0.8s)'
+
+
+def test_reconnect_does_not_report_its_own_stop_as_a_disconnect():
+    # The console would otherwise flash 'Device is not connected' on every
+    # reconnect, including the ones that work.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=5.0, power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.open()
+    del events[:]
+
+    conn.request_reconnect()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and jlink.calls.count('rtt_start') < 2:
+        time.sleep(0.02)
+    time.sleep(0.2)
+    # Snapshot before closing: close() reports a disconnect of its own, which is
+    # correct and not what this test is about.
+    statuses = [e.data.get('status') for e in events if e.type == EventType.CONN]
+    conn.close()
+    assert 'disconnected' not in statuses, \
+        f'a working reconnect reported a disconnect: {statuses}'
+
+
 def test_request_reconnect_returns_immediately():
     # It runs on the watchdog, so a key handler is never blocked for the
     # seconds an attach can take.

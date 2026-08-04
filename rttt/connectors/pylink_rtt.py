@@ -94,7 +94,7 @@ class PyLinkRTTConnector(Connector):
             try:
                 logger.info('Re-attaching RTT')
                 try:
-                    self.stop()
+                    self.stop(report=False)
                 except Exception as e:
                     logger.warning(f'Reconnect: stop failed: {e}')
                 try:
@@ -309,15 +309,24 @@ class PyLinkRTTConnector(Connector):
         """Reset the target. Restarts the RTT session unless halting."""
         was_running = self.is_running
         if was_running:
-            self.stop()
+            # Halting leaves the session down for real; a plain reset restarts
+            # it below, so that gap is not a disconnect worth reporting.
+            self.stop(report=halt)
         try:
             self.jlink.reset(ms=10, halt=halt)
         finally:
             if was_running and not halt:
                 self.start()
 
-    def stop(self):
-        """Stop the read thread and RTT."""
+    def stop(self, report=True):
+        """Stop the read thread and RTT.
+
+        report=False keeps the transport state as it was, for callers that stop
+        only to start again: reporting the intermediate state makes the console
+        flash a disconnect warning on every reconnect, and tells the watchdog
+        the link is down again — which had it tearing down and re-attaching a
+        working session about once a second.
+        """
         if not self.is_running:
             return
         self.is_running = False
@@ -325,7 +334,8 @@ class PyLinkRTTConnector(Connector):
             self.thread.join()
             self.thread = None
         self.jlink.rtt_stop()
-        self._emit_conn(False)
+        if report:
+            self._emit_conn(False)
 
     def open(self):
         super().open()
