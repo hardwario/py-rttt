@@ -805,6 +805,59 @@ def test_request_reconnect_reattaches_once_with_the_flag_off():
     conn.close()
 
 
+def test_reconnect_reopens_the_probe_when_rtt_start_alone_fails():
+    # On real hardware rtt_start() keeps failing with 'Unspecified error' after
+    # the target dropped: the DLL's connection to it has to be re-established
+    # first. Modelled here as an rtt_start that only works once connect() has
+    # run again, which the fake previously never did.
+    import pylink as pylink_mod
+
+    jlink = FakeJLink()
+    # The attach only works while the DLL's connection to the target is live.
+    # open() re-establishes it; losing the target clears it. Without that
+    # distinction the fake made every rtt_start succeed, which is why this went
+    # unnoticed.
+    live = {'value': True}
+
+    def connect(device):
+        jlink.calls.append(('connect', device))
+        live['value'] = True
+
+    def rtt_start(block_address=None):
+        jlink.calls.append('rtt_start')
+        if not live['value']:
+            raise pylink_mod.errors.JLinkException('Unspecified error.')
+
+    jlink.connect = connect
+    jlink.rtt_start = rtt_start
+
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    # The target drops: reads fail and the DLL's connection to it is stale, so
+    # every plain rtt_start from here on raises.
+    live['value'] = False
+    jlink.rtt_read = lambda i, n: (_ for _ in ()).throw(
+        pylink_mod.errors.JLinkException('gone'))
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if ('connect', 'NRF9151_XXCA') in jlink.calls:
+            break
+        time.sleep(0.05)
+    conn.close()
+
+    assert ('connect', 'NRF9151_XXCA') in jlink.calls, \
+        'reconnect never reopened the probe, so rtt_start could only keep failing'
+    # Reopening has to come before an attach, or it rescues nothing.
+    reopen_at = jlink.calls.index(('connect', 'NRF9151_XXCA'))
+    assert 'rtt_start' in jlink.calls[reopen_at:], \
+        'the probe was reopened but no attach followed it'
+
+
 def test_request_reconnect_returns_immediately():
     # It runs on the watchdog, so a key handler is never blocked for the
     # seconds an attach can take.

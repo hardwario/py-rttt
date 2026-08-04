@@ -98,6 +98,17 @@ class PyLinkRTTConnector(Connector):
                 except Exception as e:
                     logger.warning(f'Reconnect: stop failed: {e}')
                 try:
+                    # rtt_start() on its own is not enough once the target has
+                    # dropped: the DLL keeps its connection to a device that is
+                    # no longer there and every attach fails with 'Unspecified
+                    # error'. Re-establishing it first is what makes the retry
+                    # able to succeed. Needs the device, so a connector built
+                    # without one can only try the plain attach.
+                    if self.device:
+                        try:
+                            self._reopen_jlink()
+                        except Exception as e:
+                            logger.warning(f'Reconnect: reopening the probe failed: {e}')
                     self.start()
                 except Exception as e:
                     # start() reports nothing on failure, so keep the console's
