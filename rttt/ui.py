@@ -1,13 +1,10 @@
 from prompt_toolkit.widgets import TextArea, SearchToolbar, Frame, HorizontalLine, ProgressBar, Box, Button
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, WindowAlign, ConditionalContainer, FloatContainer, Float
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.margins import NumberedMargin, ScrollbarMargin
 from prompt_toolkit.layout.dimension import LayoutDimension
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.layout.layout import Layout
 from datetime import datetime
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.application import get_app
 from rttt.lexer import LogLexer
 
 

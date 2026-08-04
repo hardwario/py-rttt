@@ -6,14 +6,14 @@ import pylink
 from dataclasses import dataclass, field
 from loguru import logger
 from rttt import __version__ as version
-from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, MCPPortInUseError, SubstitutionMiddleware, DemoConnector
+from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, MCPPortInUseError, SubstitutionMiddleware
 from rttt.console import Console
 from rttt.shell_trust import ensure_shell_trust
 from rttt.utils import load_configs
 
 DEFAULT_LOG_FILE = os.path.expanduser("~/.hardwario/rttt.log")
-DEFAULT_HISTORY_FILE = os.path.expanduser(f"~/.rttt_history")
-DEFAULT_CONSOLE_FILE = os.path.expanduser(f"~/.rttt_console")
+DEFAULT_HISTORY_FILE = os.path.expanduser("~/.rttt_history")
+DEFAULT_CONSOLE_FILE = os.path.expanduser("~/.rttt_console")
 DEFAULT_JLINK_SPEED_KHZ = 2000
 DEFAULT_MCP_LISTEN = '127.0.0.1:8090'
 

@@ -8,3 +8,19 @@ from rttt.connectors.substitution import SubstitutionMiddleware
 
 # Backward compatibility alias (deprecated, use FileLogMiddleware)
 FileLogConnector = FileLogMiddleware
+
+# Re-exported for `from rttt.connectors import ...`, which is how everything
+# outside this package reaches them.
+__all__ = [
+    'AsyncMiddleware',
+    'BufferedMiddleware',
+    'Connector',
+    'DemoConnector',
+    'FileLogConnector',
+    'FileLogMiddleware',
+    'MCPMiddleware',
+    'MCPPortInUseError',
+    'Middleware',
+    'PyLinkRTTConnector',
+    'SubstitutionMiddleware',
+]

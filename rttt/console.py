@@ -159,7 +159,7 @@ class Console:
             def connector_handle_event(event: Event):
                 try:
                     self.events.put_nowait(event)
-                except Exception as e:
+                except Exception:
                     logger.exception(f"Failed to queue event: {event}")
 
             self.connector.on(connector_handle_event)
