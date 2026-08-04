@@ -46,19 +46,44 @@ class State:
         """Sources whose transport is not currently connected."""
         return [s for s, v in sorted(self.conn.items()) if v.get('status') != 'connected']
 
+    # A session that is down because someone asked for it, mapped to how it is
+    # explained. Kept apart from a dropped link: telling the user their device
+    # is not connected when they stopped it themselves is just wrong.
+    CONN_INTENDED = {
+        'stopped': ('{labels} reading is stopped',
+                    'Press <F4>, or use the MCP start tool, to read again'),
+        'released': ('{labels} probe is released',
+                     'Another tool has the probe; use the MCP jlink_open tool to take it back'),
+    }
+
+    def conn_intended(self):
+        """The intended-stop wording for the down sources, when they share one.
+
+        None when a source dropped rather than being stopped, which is what
+        tells the display to treat it as a fault.
+        """
+        statuses = {self.conn.get(s, {}).get('status') for s in self.conn_down()}
+        if len(statuses) != 1:
+            return None
+        return self.CONN_INTENDED.get(statuses.pop())
+
     def conn_title(self):
         down = self.conn_down()
         if not down:
             return ''
-        labels = [self.CONN_LABELS.get(s, s.upper()) for s in down]
-        return f'{" and ".join(labels)} is not connected'
+        labels = ' and '.join(self.CONN_LABELS.get(s, s.upper()) for s in down)
+        intended = self.conn_intended()
+        if intended:
+            return intended[0].format(labels=labels)
+        return f'{labels} is not connected'
 
     def conn_detail(self):
         for source in self.conn_down():
             error = self.conn.get(source, {}).get('error')
             if error:
                 return error
-        return ''
+        intended = self.conn_intended()
+        return intended[1] if intended else ''
 
     def reconnect(self):
         if self.on_reconnect:
@@ -268,8 +293,12 @@ def create_layout(state, history_file):
             content=Box(
                 body=Frame(
                     body=HSplit([
+                        # Red for a link that broke; plain for one the user
+                        # stopped themselves, which is not a fault to alarm
+                        # anyone about.
                         Window(FormattedTextControl(lambda: state.conn_title()), height=1,
-                               align=WindowAlign.CENTER, style="fg:#ff4444 bold"),
+                               align=WindowAlign.CENTER,
+                               style=lambda: 'bold' if state.conn_intended() else 'fg:#ff4444 bold'),
                         ConditionalContainer(
                             content=Window(FormattedTextControl(lambda: state.conn_detail()), height=1,
                                            align=WindowAlign.CENTER),
