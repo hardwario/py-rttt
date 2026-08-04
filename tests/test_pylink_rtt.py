@@ -858,6 +858,39 @@ def test_reconnect_reopens_the_probe_when_rtt_start_alone_fails():
         'the probe was reopened but no attach followed it'
 
 
+def test_reconnect_skips_the_attach_when_the_probe_cannot_be_reopened():
+    # 'Target system has no power' means there is nothing to attach to, yet the
+    # control block search would still run and burn its full 15s timeout while
+    # holding _op_lock, so an explicit request could not get in either.
+    import pylink as pylink_mod
+
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    def no_power(device):
+        raise Exception('J-Link reconnect failed: Target system has no power.')
+
+    jlink.connect = no_power
+    jlink.rtt_read = lambda i, n: (_ for _ in ()).throw(
+        pylink_mod.errors.JLinkException('gone'))
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and 'rtt_stop' not in jlink.calls:
+        time.sleep(0.02)
+    attaches_before = jlink.calls.count('rtt_start')
+    time.sleep(0.6)
+    attaches_after = jlink.calls.count('rtt_start')
+    conn.close()
+
+    assert attaches_after == attaches_before, \
+        f'searched for an RTT block with no target to find it on ' \
+        f'({attaches_after - attaches_before} attaches)'
+
+
 def test_successful_reconnect_does_not_loop_forever():
     # The stop() inside a reconnect used to report 'disconnected', which is the
     # very condition the watchdog reattaches on, so a working target was torn

@@ -105,10 +105,12 @@ class PyLinkRTTConnector(Connector):
                     # able to succeed. Needs the device, so a connector built
                     # without one can only try the plain attach.
                     if self.device:
-                        try:
-                            self._reopen_jlink()
-                        except Exception as e:
-                            logger.warning(f'Reconnect: reopening the probe failed: {e}')
+                        # Failing here means there is nothing to attach to --
+                        # an unpowered target, or the probe held elsewhere. The
+                        # control block search would spend its full 15s timeout
+                        # proving that, holding _op_lock against an explicit
+                        # request all the while, so report and wait instead.
+                        self._reopen_jlink()
                     self.start()
                 except Exception as e:
                     # start() reports nothing on failure, so keep the console's
