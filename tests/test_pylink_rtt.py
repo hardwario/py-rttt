@@ -1042,3 +1042,112 @@ def test_open_without_rtt_succeeds_with_auto_reconnect():
 
     assert conn._conn_up is True, 'never attached once the target appeared'
     conn.close()
+
+
+def test_auto_reconnect_leaves_a_suspended_session_alone():
+    # An MCP stop or jlink_close is deliberate: the caller wants the session
+    # down, usually to hand the probe to nrfjprog. The watchdog reattaching
+    # three seconds later takes it straight back.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    conn.suspend()
+    attaches = jlink.calls.count('rtt_start')
+    time.sleep(0.6)
+    conn.close()
+
+    assert jlink.calls.count('rtt_start') == attaches, \
+        'the watchdog reattached a session that was stopped on purpose'
+
+
+def test_suspend_reports_stopped_not_disconnected():
+    # 'disconnected' means something went wrong; this did not, and the console
+    # must not raise a warning over it.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, device='NRF9151_XXCA', serial=1234, speed=2000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.open()
+    del events[:]
+
+    conn.suspend()
+
+    statuses = [e.data.get('status') for e in events if e.type == EventType.CONN]
+    assert statuses == ['stopped'], f'expected a stopped report, got {statuses}'
+    conn.close()
+
+
+def test_suspend_with_released_status_for_a_freed_probe():
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, device='NRF9151_XXCA', serial=1234, speed=2000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.open()
+    del events[:]
+
+    conn.suspend(status='released')
+
+    statuses = [e.data.get('status') for e in events if e.type == EventType.CONN]
+    assert statuses == ['released']
+    conn.close()
+
+
+def test_explicit_reconnect_overrides_a_suspended_session():
+    # Asking for it outright -- F4, the dialog button, the MCP reconnect tool --
+    # is also the way back out of a suspended session.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=5.0, power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+    conn.suspend()
+    before = jlink.calls.count('rtt_start')
+
+    conn.request_reconnect()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and jlink.calls.count('rtt_start') == before:
+        time.sleep(0.02)
+
+    assert jlink.calls.count('rtt_start') > before, 'an explicit request was ignored'
+    assert not conn.is_suspended, 'the session stayed suspended after reattaching'
+    conn.close()
+
+
+def test_resume_lets_auto_reconnect_work_again():
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+    conn.suspend()
+    time.sleep(0.3)
+    attaches = jlink.calls.count('rtt_start')
+
+    conn.resume()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and jlink.calls.count('rtt_start') == attaches:
+        time.sleep(0.02)
+    conn.close()
+
+    assert jlink.calls.count('rtt_start') > attaches, \
+        'auto reconnect stayed off after the session was resumed'
+
+
+def test_reset_does_not_suspend_the_session():
+    # reset() stops only to start again; suspending there would put the session
+    # to sleep for good.
+    jlink = FakeJLink()
+    conn = PyLinkRTTConnector(jlink, device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    conn.reset()
+
+    assert not conn.is_suspended, 'reset() suspended the session'
+    assert conn.is_running, 'reset() left the session down'
+    conn.close()
