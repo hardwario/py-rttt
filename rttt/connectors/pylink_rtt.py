@@ -507,7 +507,11 @@ class PyLinkRTTConnector(Connector):
 
             was_running = self.is_running
             if was_running:
-                self.stop()
+                # Stopping only so the flash can run, and it is restarted below.
+                # Reporting it would put the Connection overlay on screen on top
+                # of the Flash one, telling the user the device fell off while it
+                # is in fact being programmed.
+                self.stop(report=False)
 
             if self.flash_cmd:
                 try:

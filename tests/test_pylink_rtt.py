@@ -1151,3 +1151,23 @@ def test_reset_does_not_suspend_the_session():
     assert not conn.is_suspended, 'reset() suspended the session'
     assert conn.is_running, 'reset() left the session down'
     conn.close()
+
+
+def test_flash_does_not_report_a_disconnect(tmp_path, virtual_clock):
+    # The stop inside flash() exists only so the flash can run; reporting it
+    # puts the Connection overlay on screen on top of the Flash one, and tells
+    # the user the device fell off when it is being programmed.
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.start()
+    del events[:]
+
+    conn.flash(str(fw))
+    stop_read_thread(conn)
+
+    statuses = [e.data.get('status') for e in events if e.type == EventType.CONN]
+    assert 'disconnected' not in statuses, \
+        f'flashing reported a disconnect: {statuses}'
