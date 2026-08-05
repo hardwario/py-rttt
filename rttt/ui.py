@@ -56,6 +56,16 @@ class State:
                      'Another tool has the probe; use the MCP jlink_open tool to take it back'),
     }
 
+    def show_conn_overlay(self):
+        """Whether the Connection overlay should be on screen.
+
+        Both overlays are centred floats, so drawing them together leaves
+        neither readable. Flash wins while it is up: it takes the link down by
+        design and says more about what is happening. The connection state is
+        still there once it closes, so nothing is lost.
+        """
+        return bool(self.conn_down()) and not self.flash_visible
+
     def conn_intended(self):
         """The intended-stop wording for the down sources, when they share one.
 
@@ -325,7 +335,7 @@ def create_layout(state, history_file):
                 ),
                 style="bg:#222222 fg:#eeeeee",
             ),
-            filter=Condition(lambda: bool(state.conn_down())),
+            filter=Condition(state.show_conn_overlay),
         ),
     )
 

@@ -383,3 +383,27 @@ def test_the_overlay_shows_for_stopped_and_disconnected_alike():
     state = State()
     state.set_conn('rtt', 'connected')
     assert state.conn_down() == []
+
+
+def test_only_one_overlay_shows_at_a_time():
+    # Both floats are centred, so showing both draws them on top of each other
+    # and neither is readable. Flashing takes the link down by design, so this
+    # combination is reachable whenever a flash fails.
+    state = State()
+    state.flash_visible = True
+    state.set_conn('rtt', 'disconnected', 'Target has no power')
+
+    assert not state.show_conn_overlay(), \
+        'the Connection overlay drew over the Flash overlay'
+    assert state.flash_visible, 'the Flash overlay must be the one that stays'
+
+
+def test_the_conn_overlay_returns_once_flashing_ends():
+    state = State()
+    state.set_conn('rtt', 'disconnected', 'Target has no power')
+    state.flash_visible = True
+    assert not state.show_conn_overlay()
+
+    state.flash_visible = False
+    assert state.show_conn_overlay(), \
+        'the disconnect went unreported once the flash overlay closed'

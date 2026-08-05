@@ -95,7 +95,7 @@ class Console:
             # selection keeps working, but an overlay with buttons has to be
             # clickable whatever view is underneath it.
             mouse_support=Condition(
-                lambda: not self.state.is_show_all() or bool(self.state.conn_down())),
+                lambda: not self.state.is_show_all() or self.state.show_conn_overlay()),
             full_screen=True,
             refresh_interval=1,
             enable_page_navigation_bindings=True,
