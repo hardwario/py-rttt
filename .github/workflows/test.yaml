@@ -77,3 +77,32 @@ jobs:
 
       - name: Package project
         run: poetry build
+
+  coinstall:
+    # rttt has to stay installable alongside the Zephyr toolchain, which pins
+    # pylink-square <2.0 via pyocd. Requiring ^2.0.1 made the two unresolvable:
+    # `west packages pip --install` gave up, and pip on its own backtracked
+    # through ancient releases looking for a way out.
+    #
+    # Resolved from an empty environment on purpose. Installing into an image
+    # that already has the packages hides the conflict, because pip leaves what
+    # is there alone.
+    needs: codestyle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Resolve against the Zephyr pylink pin
+        run: pip install --dry-run . "pyocd==0.42.0"
+
+      - name: Install alongside it for real, and check the result holds
+        run: |
+          pip install . "pyocd==0.42.0"
+          pip check
+          rttt --version
