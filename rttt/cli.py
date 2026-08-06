@@ -114,8 +114,9 @@ def cli(app: CliContext, serial, device, speed, reset, flash_cmd, address, termi
 
     if reset:
         try:
-            jlink.reset()
-            jlink.go()
+            # halt=False leaves the firmware running; there is no go() in
+            # pylink to follow a halting reset with.
+            jlink.reset(halt=False)
         except pylink.errors.JLinkException as e:
             raise click.ClickException(f'J-Link: {e}') from e
         time.sleep(1)
