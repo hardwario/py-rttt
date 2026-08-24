@@ -95,6 +95,10 @@ class MCPMiddleware(AsyncMiddleware):
         whole process, so we fail fast with a clear error up front.
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Match uvicorn's bind semantics: without SO_REUSEADDR this check
+        # fails on TIME_WAIT sockets left over from a previous instance,
+        # even though the real bind in uvicorn would succeed.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((host, port))
         except OSError as e:
