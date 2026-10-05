@@ -57,7 +57,8 @@ Usage: rttt [OPTIONS]
 
 Options:
   --version                  Show the version and exit.
-  --serial SERIAL_NUMBER     J-Link serial number.
+  --serial SERIAL_NUMBER     J-Link serial number, or DEMO for the demo probe.
+  --demo                     Use the built-in demo probe (same as --serial DEMO).
   --device DEVICE            J-Link Device name.
   --speed SPEED              J-Link clock speed in kHz. [default: 2000]
   --reset                    Reset application firmware.
@@ -98,6 +99,64 @@ Use a specific J-Link serial number:
 ```bash
 rttt --device NRF52840_xxAA --serial 123456789
 ```
+
+### Demo probe (no hardware)
+
+For GUI development without a J-Link, select the built-in demo probe by serial number (same CLI path as a real probe):
+
+```bash
+rttt --serial DEMO
+# or
+rttt --demo
+```
+
+The demo emits synthetic terminal/log lines, reports `CONN connected`, and supports reconnect via **F4**, the overlay **Reconnect** button, or by typing `reconnect` in the command field. Type `disconnect` to simulate a drop and exercise the Connection overlay (output pauses until reconnect succeeds).
+
+### Clipboard (SSH / tmux)
+
+Copy uses a hybrid clipboard: **OSC 52** (works over SSH into the local terminal) plus **pyperclip** when a local GUI display is available. Select text with the mouse to auto-copy from **one pane only** (Interactive Terminal *or* Device Log — never both merged). A real drag (mouse move with the button held) **auto-pauses** scroll so streaming lines do not jump the viewport; a plain click does not pause. While paused (manual **F5** or auto during drag), the status bar shows a highlighted **PAUSED** marker and the F5 hint switches to **F5 Resume** (back to **F5 Pause** when streaming). After a successful select-to-copy, if scroll was running before the drag, streaming **auto-resumes** and the highlight clears (toast `Copied N chars — resumed`). If you had paused with **F5** first, the pause and highlight stay so you can keep reading. Toasts appear **inside** the status bar row (they do not push the panes up). **Ctrl-C** / **Ctrl-Insert** re-toasts the last single-pane copy. **Right-click** on Log/Terminal copies the selection in that pane (same path as Ctrl-C; no selection → re-toast last copy or `Nothing selected`). **Right-click** on the Command line pastes (local pyperclip when available; otherwise the in-app last copy — no OSC 52 clipboard *read*). Multi-line paste keeps the first line only (Command is single-line). Hold **Shift** while dragging for the terminal's native selection when the emulator supports that bypass. Exit with **Ctrl-Q** if **F10** is captured by the desktop (e.g. XFCE).
+
+Over SSH, pyperclip alone fails because it talks to the remote machine — `rttt` skips it when `SSH_CONNECTION` / `SSH_CLIENT` is set and relies on OSC 52. Prefer a terminal with OSC 52 enabled. With tmux, allow passthrough, for example:
+
+```bash
+set -g set-clipboard on
+# or allow OSC 52 through: set -g allow-passthrough on   # tmux >= 3.3
+```
+
+**Verify OSC 52 over SSH:** from a local machine with clipboard tools, SSH in, run `rttt --demo`, select a known string, then on the *local* host check the clipboard (`pbpaste` / `xclip -o` / paste into an editor). Unit tests cover the SSH path by setting `SSH_CONNECTION` and asserting the OSC 52 escape sequence (including tmux DCS wrapping) without needing a real remote session.
+
+On a local Linux desktop without a working OSC 52 terminal, pyperclip needs a clipboard helper such as **xclip** or **xsel** (install separately, e.g. `sudo apt install xclip`). They are not a hard dependency of `rttt`.
+
+### GUI retest checklist (mouse / clipboard / selection)
+
+Unit tests cover HybridClipboard and selection helpers. A **PTY integration suite** (`tests/test_tui_pty.py`) additionally spawns `rttt --demo` under a pseudo-terminal, renders with `pyte`, injects real xterm SGR mouse sequences, and asserts OSC 52 clipboard payloads — run it with the rest of the suite (`pytest`). Those tests skip automatically where `pty` is unavailable (e.g. Windows CI).
+
+A green pytest run is still **not** enough after mouse / toast / clipboard changes: also retest in a **real terminal** (desktop or SSH). The PTY harness does not cover every emulator quirk (VTE OSC 52 limits, Shift-drag native selection, desktop key grabs like F10).
+
+```bash
+rttt --demo
+# or: pytest tests/test_tui_pty.py -v
+```
+
+Manual checklist:
+
+1. **First drag** (app just started, Command focused): slow-drag in Log *or* Terminal → toast `Copied N chars — resumed`, highlight clears, scroll running again. Must **not** stop at only `Paused for selection`.
+2. **Focus switch**: after selecting in Log, the *first* drag in Terminal (and the other way around) must copy on that same gesture — not only move focus.
+3. **Selection start**: press on line N, release on line N+k → highlight/copy starts on line N (not near the bottom / old scroll tip). End follows the release point.
+4. **Plain click** (no drag): stream stays running; no 1-cell highlight; no pause toast.
+5. **After F5 resume**: first drag again still copies and auto-resumes.
+6. **Manual F5 then drag**: press F5 → status bar shows **PAUSED** and **F5 Resume**; then drag-copy → stays paused, highlight sticks, toast without `— resumed` (still **PAUSED**).
+7. **Streaming mid-drag**: with lines flying, drag still selects and copies (auto-pause on *move*, not press); **PAUSED** appears during the drag, then clears on auto-resume. Toast must include `— resumed` when scroll was on before the drag.
+8. **One pane only**: selection in Log must not merge Terminal text (and vice versa).
+9. **Ctrl-C / Ctrl-Insert**: after auto-resume (no highlight), re-toasts the last single-pane copy **inside** the status bar (pane heights must not jump).
+10. **Toast layout**: while a toast is visible, both panes stay the same height as without a toast (toast replaces hints in the status bar, not a new row).
+11. **Local clipboard**: `xclip -o` / `pbpaste` (or paste into an editor) shows the copied text.
+12. **SSH / OSC 52** (when available): select in remote `rttt --demo`, paste on the *local* host.
+13. **Reconnect**: F4 / overlay button / typed `reconnect`; `disconnect` silences demo output until reconnect.
+14. **Right-click copy**: with a sticky highlight (e.g. after F5 + drag), right-click in that pane → `Copied N chars`; streaming/pause state unchanged; focus stays put. With no selection and a prior copy → re-toast; with nothing ever copied → `Nothing selected`.
+15. **Right-click paste**: right-click the Command line → focuses Command, inserts clipboard text (trailing newline stripped; first line only if multi-line), toast `Pasted N chars` or `Clipboard empty`. Over SSH, paste uses the last in-app copy (select something first).
+
+**Limits:** some VTE-based terminals (older GNOME Terminal) ignore or cap OSC 52; very large selections are truncated (~60k characters).
 
 ## Configuration File
 
