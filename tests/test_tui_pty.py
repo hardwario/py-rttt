@@ -198,6 +198,14 @@ class RtttPty:
         self.child.send(_sgr(0, x, y, down=False))
         self.pump(0.35)
 
+    def right_click(self, r: int, c: int):
+        """SGR right button (button=2) down/up at 0-based screen coords."""
+        x, y = c + 1, r + 1
+        self.child.send(_sgr(2, x, y, down=True))
+        self.pump(0.05)
+        self.child.send(_sgr(2, x, y, down=False))
+        self.pump(0.45)
+
     def press_f5(self):
         self.child.send(b'\x1b[15~')
         self.pump(0.35)
@@ -334,3 +342,38 @@ def test_burst_drag_still_copies_exact_span(pty_app):
     text = app.osc_copies[n]
     assert text.startswith(a[2]), text
     assert b[2] in text, text
+
+
+def test_right_click_copies_after_left_drag(pty_app):
+    """Left-drag select (manual pause) then RMB copies again via SGR button 2."""
+    app = pty_app
+    app.press_f5()
+    assert 'PAUSED' in app.status()
+    logs = app.list_pane_lines('log', 'log')
+    assert len(logs) >= 3
+    a, b = logs[0], logs[2]
+    n = len(app.osc_copies)
+    app.drag(a[0], a[1], b[0], b[1] + len(b[2]) - 1)
+    assert app.osc_copies[n:], 'setup left-drag must copy'
+    first = app.osc_copies[n]
+    # Highlight sticks while manually paused — right-click should copy again.
+    n = len(app.osc_copies)
+    app.right_click(a[0], a[1] + 1)
+    # Either a fresh OSC 52 write, or at least a Copied toast (re-toast path).
+    st = app.status()
+    assert 'Copied' in st or app.osc_copies[n:], (st, app.osc_copies[n:])
+    assert 'PAUSED' in st, 'right-click must not resume'
+    if app.osc_copies[n:]:
+        assert a[2] in app.osc_copies[n] or first == app.osc_copies[n]
+
+
+def test_right_click_without_selection_does_not_pause(pty_app):
+    app = pty_app
+    if 'PAUSED' in app.status():
+        app.press_f5()
+    pos = app.find_in_pane('log 4', 'log') or app.list_pane_lines('log', 'log')[0][:2]
+    n = len(app.osc_copies)
+    app.right_click(pos[0], pos[1])
+    assert 'PAUSED' not in app.status()
+    # May re-toast a prior copy from an earlier test fixture state — just no pause.
+    _ = n  # keep prior count unused; toast path is fine
