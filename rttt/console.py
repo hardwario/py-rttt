@@ -106,6 +106,10 @@ class Console:
         # mirror it to the system clipboard with toast feedback.
         self._install_select_to_copy(terminal_window)
         self._install_select_to_copy(logger_window)
+        # Right-click is separate from left-drag selection (must not pause,
+        # start a selection, or steal pane focus). RMB on Log/Terminal copies;
+        # RMB on the Command line pastes.
+        self._install_right_click_paste(self.input_field)
 
         self.app = Application(
             layout=Layout(root_container, focused_element=self.input_field),
@@ -417,6 +421,13 @@ class Console:
             # select+copy. Pause only once the mouse actually moves and a
             # selection starts — plain click must not freeze the stream.
             buf = text_area.buffer
+            # Right-click: copy only. Do NOT call the BufferControl handler —
+            # its MOUSE_DOWN would exit_selection before we can copy on UP.
+            # Also must not pause, start a drag, or change pane focus.
+            if mouse_event.button == MouseButton.RIGHT:
+                if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                    self._right_click_copy_pane(buf)
+                return None
             if mouse_event.event_type == MouseEventType.MOUSE_DOWN:
                 self._drag_buffer = buf
                 self._paused_for_drag = False
@@ -483,6 +494,87 @@ class Console:
             return result
 
         control.mouse_handler = mouse_handler
+
+    def _right_click_copy_pane(self, buffer):
+        """Right-click on Log/Terminal: copy that pane's selection (Ctrl-C path).
+
+        Does not change focus or pause state. No selection → same as Ctrl-C:
+        re-toast ``_last_copied``, or ``Nothing selected``.
+        """
+        return self._copy_from_buffer(buffer, clear_selection=True)
+
+    def _install_right_click_paste(self, text_area):
+        """Right-click on the Command line focuses it and pastes clipboard text."""
+        control = text_area.control
+        original = control.mouse_handler
+
+        def mouse_handler(mouse_event):
+            if mouse_event.button == MouseButton.RIGHT:
+                if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                    self._paste_into_command()
+                return None
+            return original(mouse_event)
+
+        control.mouse_handler = mouse_handler
+
+    def _read_paste_text(self):
+        """Text to paste into Command: local pyperclip, else in-app last copy.
+
+        Never issues OSC 52 clipboard *read* queries (unsupported / unreliable).
+        Over SSH (HybridClipboard ``_use_pyperclip`` False) we only use the
+        in-memory HybridClipboard / ``_last_copied``.
+        """
+        clipboard = self.app.clipboard if getattr(self, 'app', None) else None
+        use_pp = bool(getattr(clipboard, '_use_pyperclip', False)) if clipboard else False
+        if use_pp:
+            try:
+                import pyperclip
+                text = pyperclip.paste()
+                if text:
+                    return text
+            except Exception:
+                pass
+        if clipboard is not None:
+            try:
+                data = clipboard.get_data()
+                if data is not None and data.text:
+                    return data.text
+            except Exception:
+                pass
+        return self._last_copied or ''
+
+    @staticmethod
+    def _command_paste_payload(text: str) -> str:
+        """Normalize clipboard text for the single-line Command field.
+
+        Strip a trailing newline (common when copying a whole line). If more
+        than one line remains, keep only the first — the input is height=1 /
+        multiline=False, so embedding newlines would corrupt the command row.
+        """
+        if not text:
+            return ''
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        text = text.rstrip('\n')
+        if '\n' in text:
+            text = text.split('\n', 1)[0]
+        return text
+
+    def _paste_into_command(self):
+        """Focus Command and insert paste text at the cursor; toast the result."""
+        raw = self._read_paste_text()
+        text = self._command_paste_payload(raw if raw is not None else '')
+        if not text:
+            self.state.show_message('Clipboard empty')
+            return False
+        try:
+            if self.app is not None:
+                self.app.layout.focus(self.input_field)
+        except Exception:
+            pass
+        self.input_field.buffer.insert_text(text, fire_event=False)
+        n = len(text)
+        self.state.show_message(f'Pasted {n} char{"s" if n != 1 else ""}')
+        return True
 
     def _copy_from_buffer(self, buffer, clear_selection=True):
         """Copy the current selection (or last copy) to the hybrid clipboard.

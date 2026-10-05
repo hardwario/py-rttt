@@ -646,3 +646,271 @@ def test_manual_f5_pause_then_drag_copy_stays_paused():
             assert console._pause_origin == 'manual'
             assert buf.selection_state is not None, 'sticky highlight when manually paused'
             assert 'paste-me' in console.app.clipboard.get_data().text
+
+
+def _right_ev(x, typ, button=None):
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseEvent, MouseEventType, MouseButton
+    return MouseEvent(
+        position=Point(x=x, y=0),
+        event_type=typ,
+        button=button or MouseButton.RIGHT,
+        modifiers=frozenset(),
+    )
+
+
+def test_right_click_copies_selection_without_pausing():
+    """RMB on a pane with a selection copies via Ctrl-C path; no pause/focus steal."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType, MouseButton
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.selection import SelectionType
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    buf.set_document(Document('aaaa SELECTME bbbb\n'), bypass_readonly=True)
+    control = console.logger_window.control
+
+    class FakeLine:
+        def display_to_source(self, x):
+            return x
+
+    control._last_get_processed_line = lambda y: FakeLine()
+    handler = control.mouse_handler
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.app.layout.focus(console.input_field)
+            console.state.scroll_to_end = True
+            console.state.message = ''
+
+            # Sticky selection as after a left-drag with manual pause.
+            buf.cursor_position = 5
+            buf.start_selection(selection_type=SelectionType.CHARACTERS)
+            buf.cursor_position = 12  # exclusive end before inclusive bump
+            console._make_mouse_selection_inclusive(buf)
+            assert 'SELECTME' in console._selected_text(buf)
+
+            was_scrolling = console.state.scroll_to_end
+            focused_before = console.has_focus(console.input_field)
+
+            handler(_right_ev(8, MouseEventType.MOUSE_DOWN))
+            assert console.state.scroll_to_end is was_scrolling
+            assert console.has_focus(console.input_field) is focused_before
+            assert buf.selection_state is not None, 'RMB down must not clear selection'
+
+            handler(_right_ev(8, MouseEventType.MOUSE_UP))
+            assert 'Copied' in console.state.message, console.state.message
+            assert 'SELECTME' in console.app.clipboard.get_data().text
+            assert console.state.scroll_to_end is was_scrolling
+            assert console.has_focus(console.input_field) is focused_before
+            # clear_selection=True → highlight may go (OK per UX)
+            assert console._last_copied and 'SELECTME' in console._last_copied
+
+
+def test_right_click_no_selection_retoasts_last_copy():
+    """No selection → same as Ctrl-C: re-toast _last_copied."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.output import DummyOutput
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.terminal_buffer
+    buf.set_document(Document('no selection here\n'), bypass_readonly=True)
+    control = console.terminal_window.control
+
+    class FakeLine:
+        def display_to_source(self, x):
+            return x
+
+    control._last_get_processed_line = lambda y: FakeLine()
+    handler = control.mouse_handler
+    console._last_copied = 'prior payload'
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.state.scroll_to_end = True
+            console.state.message = ''
+            handler(_right_ev(3, MouseEventType.MOUSE_DOWN))
+            handler(_right_ev(3, MouseEventType.MOUSE_UP))
+            assert 'Copied' in console.state.message
+            assert console.app.clipboard.get_data().text == 'prior payload'
+            assert console.state.scroll_to_end is True
+
+
+def test_right_click_nothing_selected_when_empty():
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.output import DummyOutput
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    buf.set_document(Document('empty\n'), bypass_readonly=True)
+    control = console.logger_window.control
+
+    class FakeLine:
+        def display_to_source(self, x):
+            return x
+
+    control._last_get_processed_line = lambda y: FakeLine()
+    console._last_copied = ''
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.state.message = ''
+            control.mouse_handler(_right_ev(1, MouseEventType.MOUSE_UP))
+            assert console.state.message == 'Nothing selected'
+
+
+def test_right_click_does_not_start_selection_on_move():
+    """Right-drag must not create a selection or pause streaming."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.output import DummyOutput
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    buf.set_document(Document('abcdefghijklmnop\n'), bypass_readonly=True)
+    control = console.logger_window.control
+
+    class FakeLine:
+        def display_to_source(self, x):
+            return x
+
+    control._last_get_processed_line = lambda y: FakeLine()
+    handler = control.mouse_handler
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.state.scroll_to_end = True
+            console._last_copied = ''
+            handler(_right_ev(2, MouseEventType.MOUSE_DOWN))
+            handler(_right_ev(10, MouseEventType.MOUSE_MOVE))
+            assert buf.selection_state is None
+            assert console.state.scroll_to_end is True
+            handler(_right_ev(10, MouseEventType.MOUSE_UP))
+            assert console.state.message == 'Nothing selected'
+            assert console.state.scroll_to_end is True
+
+
+def test_command_paste_payload_first_line_only():
+    from rttt.console import Console
+    assert Console._command_paste_payload('one\n') == 'one'
+    assert Console._command_paste_payload('one\r\n') == 'one'
+    assert Console._command_paste_payload('first\nsecond\n') == 'first'
+    assert Console._command_paste_payload('') == ''
+    assert Console._command_paste_payload('plain') == 'plain'
+
+
+def test_right_click_paste_from_pyperclip(monkeypatch):
+    """Local GUI path: pyperclip.paste() feeds Command; toast Pasted N chars."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.output import DummyOutput
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    import types
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=True)
+    fake = types.SimpleNamespace(paste=lambda: 'hello from sys\n', copy=lambda t: None)
+    # PyperclipException attribute used elsewhere; not needed for paste.
+    monkeypatch.setitem(__import__('sys').modules, 'pyperclip', fake)
+
+    control = console.input_field.control
+    # Ensure FakeLine not required for input paste (we don't call original on RMB)
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.app.layout.focus(console.logger_window)
+            console.input_field.buffer.text = ''
+            console.state.message = ''
+            control.mouse_handler(_right_ev(2, MouseEventType.MOUSE_DOWN))
+            control.mouse_handler(_right_ev(2, MouseEventType.MOUSE_UP))
+            assert console.has_focus(console.input_field)
+            assert console.input_field.buffer.text == 'hello from sys'
+            assert console.state.message == 'Pasted 14 chars'
+
+
+def test_right_click_paste_ssh_fallback_to_in_app():
+    """SSH / no pyperclip: paste HybridClipboard / _last_copied into Command."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.output import DummyOutput
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    console.app.clipboard.set_text('in-app paste me')
+    console._last_copied = 'in-app paste me'
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.app.layout.focus(console.terminal_window)
+            console.input_field.buffer.text = 'cmd '
+            console.input_field.buffer.cursor_position = 4
+            console.state.message = ''
+            console.input_field.control.mouse_handler(
+                _right_ev(1, MouseEventType.MOUSE_UP))
+            assert console.has_focus(console.input_field)
+            assert console.input_field.buffer.text == 'cmd in-app paste me'
+            assert 'Pasted' in console.state.message
+
+
+def test_right_click_paste_empty_clipboard():
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.output import DummyOutput
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    console._last_copied = ''
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.input_field.buffer.text = ''
+            console.state.message = ''
+            console.input_field.control.mouse_handler(
+                _right_ev(0, MouseEventType.MOUSE_UP))
+            assert console.state.message == 'Clipboard empty'
+            assert console.input_field.buffer.text == ''
