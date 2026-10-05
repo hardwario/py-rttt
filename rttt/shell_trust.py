@@ -55,6 +55,69 @@ def save_trusted(trusted: dict[str, str]) -> None:
             f.write(f'{trusted[path]}  {path}\n')
 
 
+
+def _tty_streams():
+    """Return (in, out) streams for interactive prompts, preferring /dev/tty.
+
+    Using /dev/tty keeps piped stdin (or a one-shot answer) from being
+    consumed / left at EOF before the prompt_toolkit TUI starts.
+    """
+    try:
+        tty_in = open('/dev/tty', 'r')
+        tty_out = open('/dev/tty', 'w')
+        return tty_in, tty_out
+    except OSError:
+        return None, None
+
+
+def _can_prompt_interactively() -> bool:
+    if sys.stdin.isatty():
+        return True
+    tty_in, tty_out = _tty_streams()
+    if tty_in is None:
+        return False
+    try:
+        return tty_in.isatty()
+    finally:
+        tty_in.close()
+        tty_out.close()
+
+
+def _confirm_on_tty(message: str, default: bool = False) -> bool:
+    tty_in, tty_out = _tty_streams()
+    if tty_in is None:
+        return click.confirm(message, default=default)
+    old_in, old_out = sys.stdin, sys.stdout
+    try:
+        sys.stdin, sys.stdout = tty_in, tty_out
+        return click.confirm(message, default=default)
+    finally:
+        sys.stdin, sys.stdout = old_in, old_out
+        tty_in.close()
+        tty_out.close()
+
+
+def _flush_tty_input() -> None:
+    try:
+        import termios
+        for stream in (sys.stdin,):
+            try:
+                if stream.isatty():
+                    termios.tcflush(stream.fileno(), termios.TCIFLUSH)
+            except Exception:
+                pass
+        try:
+            fd = os.open('/dev/tty', os.O_RDONLY)
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
 def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool, check_substitutions: bool = True) -> None:
     """Prompt the user to approve shell commands from each config source.
 
@@ -92,7 +155,7 @@ def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool, chec
         save_trusted(trusted)
         return
 
-    if not sys.stdin.isatty():
+    if not _can_prompt_interactively():
         paths = ', '.join(p for p, _, _ in needs_prompt)
         click.secho(
             f'Shell commands in {paths} require confirmation. '
@@ -106,7 +169,7 @@ def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool, chec
             click.echo(f'  {name}: {command}')
         click.echo()
 
-        if not click.confirm('Allow these commands to run when expanded?', default=False):
+        if not _confirm_on_tty('Allow these commands to run when expanded?', default=False):
             click.secho('Shell commands declined. Exiting.', err=True, fg='red')
             sys.exit(1)
 
@@ -114,3 +177,6 @@ def ensure_shell_trust(sources: list[tuple[str, dict]], trust_shells: bool, chec
 
     save_trusted(trusted)
     click.secho(f'Trust saved to {TRUST_FILE}', fg='green')
+    # Drop any leftover typeahead (e.g. automation that sent an extra key
+    # after "y") so the TUI does not immediately exit on EOF / Ctrl-D.
+    _flush_tty_input()

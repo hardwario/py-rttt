@@ -64,6 +64,7 @@ def test_ensure_shell_trust_exits_when_hash_differs_and_noninteractive(trust_fil
     save_trusted({'/cfg.yaml': compute_hash({'GIT': 'echo 1'})})
     sources = [('/cfg.yaml', {'substitutions': {'GIT': {'shell': 'echo 2'}}})]
     monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+    monkeypatch.setattr(shell_trust, '_tty_streams', lambda: (None, None))
 
     with pytest.raises(SystemExit) as exc:
         ensure_shell_trust(sources, trust_shells=False)
@@ -75,6 +76,7 @@ def test_ensure_shell_trust_covers_flash_cmd(trust_file, monkeypatch):
     # trust even when substitutions are disabled.
     sources = [('/cfg.yaml', {'flash_cmd': 'nrfjprog --program {file}'})]
     monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+    monkeypatch.setattr(shell_trust, '_tty_streams', lambda: (None, None))
 
     with pytest.raises(SystemExit):
         ensure_shell_trust(sources, trust_shells=False, check_substitutions=False)
@@ -108,6 +110,21 @@ def test_ensure_shell_trust_only_prompts_for_changed_source(trust_file, monkeypa
         ('/proj.yaml', {'substitutions': {'BUILD': {'shell': 'echo b'}}}),
     ]
     monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+    monkeypatch.setattr(shell_trust, '_tty_streams', lambda: (None, None))
 
     with pytest.raises(SystemExit):
         ensure_shell_trust(sources, trust_shells=False)
+
+
+def test_ensure_shell_trust_confirm_uses_tty_and_flushes(trust_file, monkeypatch):
+    sources = [('/cfg.yaml', {'substitutions': {'GIT': {'shell': 'echo 1'}}})]
+    monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+    # Pretend /dev/tty exists so we take the interactive path.
+    monkeypatch.setattr(shell_trust, '_can_prompt_interactively', lambda: True)
+    monkeypatch.setattr(shell_trust, '_confirm_on_tty', lambda msg, default=False: True)
+    flushed = []
+    monkeypatch.setattr(shell_trust, '_flush_tty_input', lambda: flushed.append(True))
+
+    ensure_shell_trust(sources, trust_shells=False)
+    assert load_trusted() == {'/cfg.yaml': compute_hash({'GIT': 'echo 1'})}
+    assert flushed == [True]

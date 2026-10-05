@@ -8,7 +8,10 @@ from click.testing import CliRunner
 
 from rttt.cli import SerialParamType, cli, CliContext, _build_demo_connector
 from rttt.connectors.demo import DEMO_SERIAL, DemoConnector
+from rttt.console import Console
 from rttt.event import EventType
+from rttt.clipboard import HybridClipboard
+
 
 def test_serial_param_accepts_demo_and_int():
     param = SerialParamType()
@@ -17,6 +20,7 @@ def test_serial_param_accepts_demo_and_int():
     assert param.convert('1234', None, None) == 1234
     with pytest.raises(click.BadParameter):
         param.convert('not-a-sn', None, None)
+
 
 def test_demo_connector_emits_conn_connected():
     events = []
@@ -32,6 +36,7 @@ def test_demo_connector_emits_conn_connected():
     assert conn_events[0].data['source'] == 'rtt'
     assert any(e.type == EventType.OUT for e in events)
     assert any(e.type == EventType.LOG for e in events)
+
 
 def test_demo_connector_request_reconnect():
     events = []
@@ -49,6 +54,7 @@ def test_demo_connector_request_reconnect():
     # Ends reconnected (last non-close transition should have restored up).
     assert statuses[-1] in ('connected', 'disconnected')
 
+
 def test_demo_disconnect_command_simulates_drop():
     events = []
     conn = DemoConnector(delay=0.05)
@@ -64,6 +70,7 @@ def test_demo_disconnect_command_simulates_drop():
     assert down
     assert 'Demo disconnect' in down[0].data.get('error', '')
 
+
 def test_build_demo_connector_uses_demo_leaf():
     app = CliContext(config={}, sources=[])
     connector = _build_demo_connector(
@@ -75,6 +82,7 @@ def test_build_demo_connector_uses_demo_leaf():
     while hasattr(leaf, 'connector'):
         leaf = leaf.connector
     assert isinstance(leaf, DemoConnector)
+
 
 def test_cli_serial_demo_skips_jlink(monkeypatch, tmp_path):
     """--serial DEMO must not touch pylink / J-Link at all."""
@@ -107,6 +115,7 @@ def test_cli_serial_demo_skips_jlink(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert opened
 
+
 def test_cli_demo_flag_alias(monkeypatch, tmp_path):
     opened = []
 
@@ -129,6 +138,12 @@ def test_cli_demo_flag_alias(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert opened
 
+
+def test_console_uses_hybrid_clipboard():
+    console = Console(DemoConnector(delay=10), history_file=None)
+    assert isinstance(console.app.clipboard, HybridClipboard)
+
+
 def test_demo_reconnect_command():
     events = []
     conn = DemoConnector(delay=0.05, reconnect_interval=0.05)
@@ -145,6 +160,7 @@ def test_demo_reconnect_command():
     statuses = [e.data['status'] for e in events if e.type == EventType.CONN]
     assert statuses[-1] == 'connected'
     conn.close()
+
 
 def test_demo_stops_output_while_disconnected():
     events = []
