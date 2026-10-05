@@ -41,6 +41,9 @@ mcp = "^1.27"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
+pexpect = "^4.9.0"
+ptyprocess = "^0.7.0"
+pyte = "^0.8.2"
 
 [poetry.group.dev.dependencies]
 pycodestyle = "^2.12.1"

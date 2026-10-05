@@ -4,6 +4,8 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import LayoutDimension
 from prompt_toolkit.history import FileHistory
 from datetime import datetime
+import time
+import asyncio
 from prompt_toolkit.filters import Condition
 from rttt.lexer import LogLexer
 
@@ -32,6 +34,37 @@ class State:
         self.on_reconnect = None
         self.on_auto_reconnect = None
         self.auto_reconnect_button = None
+        # Ephemeral status toast (copy feedback, etc.); cleared by expiry or task.
+        self.message = ''
+        self.message_expires = 0.0
+
+    def show_message(self, text, seconds=2.0):
+        """Show an ephemeral toast inside the status bar (style class:message)."""
+        self.message = text or ''
+        self.message_expires = time.monotonic() + seconds if text else 0.0
+        if not self.app:
+            return
+        self.app.invalidate()
+        # Schedule auto-clear only while the app loop is running; otherwise
+        # current_message() still hides it after message_expires.
+        if not getattr(self.app, 'is_running', False):
+            return
+
+        async def _clear(expected=text, expires=self.message_expires):
+            delay = max(0.0, expires - time.monotonic())
+            await asyncio.sleep(delay)
+            if self.message == expected and self.message_expires == expires:
+                self.message = ''
+                self.message_expires = 0.0
+                if self.app:
+                    self.app.invalidate()
+
+        self.app.create_background_task(_clear())
+
+    def current_message(self):
+        if self.message and time.monotonic() < self.message_expires:
+            return self.message
+        return ''
 
     def is_show_status_bar(self):
         return self.show_status_bar
@@ -190,23 +223,43 @@ def create_logger_window():
 def create_status_bar(state):
     """
     Create the status bar for the console.
+
+    Pause state and ephemeral toasts live in this single row so pane heights
+    never jump when a message appears (a separate toast strip pushed both
+    panes up one line and made drag hit the wrong line).
     """
     def get_statusbar_text():
-        items = [
-            ('class:title', ' HARDWARIO RTTT Console     '),
-            ('class:title', ' <F3> Focus '),
-            ('class:title', ' <F4> Reconnect '),
-            ('class:title', ' <F5> Pause ') if state.scroll_to_end else ('class:yellow', ' <F5> Pause '),
-            ('class:title', ' <F8> Clear '),
-            ('class:title', ' <F10> Exit (or Ctrl-<F10>) '),
-            ('class:title', ' [Shift-]<Tab> Cycle '),
-        ]
+        paused = not state.scroll_to_end
+        items = [('class:title', ' RTTT ')]
+        if paused:
+            # Distinct reverse/yellow segment — visible on every pause path
+            # (F5, auto-pause on drag move, stays until resume).
+            items.append(('class:paused', ' PAUSED '))
+
+        toast = state.current_message()
+        if toast:
+            # Temporarily replace the hint cheatsheet; keep RTTT / PAUSED / clock.
+            items.append(('class:message', f' {toast} '))
+            return items
+
+        # Keep hints short so Copy / Shift-drag stay visible around 80–100 cols.
+        f5_style = 'class:yellow' if paused else 'class:title'
+        f5_label = ' F5 Resume ' if paused else ' F5 Pause '
+        items.extend([
+            ('class:title', ' F3 Focus '),
+            ('class:title', ' F4 Reconn '),
+            (f5_style, f5_label),
+            ('class:title', ' F8 Clear '),
+            ('class:title', ' Ctrl-Q Quit '),
+            ('class:title', ' Ctrl-C Copy '),
+            ('class:title', ' Shift-drag native '),
+        ])
         # No disconnect indicator here: the overlay stays up for as long as the
         # transport is down, so a second copy on the bar is just noise.
         return items
 
     def get_statusbar_time():
-        return datetime.now().strftime('%b %d, %Y  %H:%M:%S')
+        return datetime.now().strftime('%H:%M:%S')
 
     return ConditionalContainer(
         content=VSplit([
@@ -216,7 +269,7 @@ def create_status_bar(state):
             Window(
                 FormattedTextControl(get_statusbar_time),
                 style="class:status.right",
-                width=24,
+                width=10,
                 align=WindowAlign.RIGHT,
             ),
         ],
@@ -358,6 +411,8 @@ def create_layout(state, history_file):
                     content=hs_logger,
                     filter=Condition(state.is_show_logger)
                 ),
+                # Toast is rendered inside the status bar (see create_status_bar)
+                # so this row must not appear — it used to shift both panes up.
                 status_bar
             ]
         ),

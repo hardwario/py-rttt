@@ -336,7 +336,13 @@ def test_status_bar_hints_f4():
 
     state = State()
     control = create_status_bar(state).content.children[0].content
-    assert any('<F4> Reconnect' in t for _, t in control.text())
+    texts = [t for _, t in control.text()]
+    joined = ' '.join(texts)
+    # Short labels keep Copy / Shift-drag visible on ~80–100 columns.
+    assert 'F4' in joined and 'Reconn' in joined
+    assert 'Ctrl-Q' in joined, 'F10 may be captured by the desktop; Ctrl-Q must stay documented'
+    assert 'Shift-drag' in joined
+    assert 'Copy' in joined
 
 
 def test_a_stopped_session_is_not_reported_as_a_fault():
@@ -407,3 +413,92 @@ def test_the_conn_overlay_returns_once_flashing_ends():
     state.flash_visible = False
     assert state.show_conn_overlay(), \
         'the disconnect went unreported once the flash overlay closed'
+
+
+def _statusbar_joined(state):
+    from rttt.ui import create_status_bar
+    control = create_status_bar(state).content.children[0].content
+    return ''.join(t for _, t in control.text())
+
+
+def test_status_bar_shows_paused_and_f5_resume_when_paused():
+    state = State()
+    state.scroll_to_end = True
+    running = _statusbar_joined(state)
+    assert 'PAUSED' not in running
+    assert 'F5 Pause' in running
+    assert 'F5 Resume' not in running
+
+    state.scroll_to_end = False
+    paused = _statusbar_joined(state)
+    assert 'PAUSED' in paused
+    assert 'F5 Resume' in paused
+    assert 'F5 Pause' not in paused
+
+
+def test_status_bar_shows_toast_inline_keeping_paused():
+    import time
+    state = State()
+    state.scroll_to_end = False
+    state.message = 'Copied 27 chars — resumed'
+    state.message_expires = time.monotonic() + 60
+    joined = _statusbar_joined(state)
+    assert 'PAUSED' in joined
+    assert 'Copied 27 chars — resumed' in joined
+    # Hints yield to the toast; F5 label is not required while toast is up.
+    assert 'Shift-drag' not in joined
+
+
+def test_toast_does_not_change_pane_height():
+    """Pane heights must stay constant whether a toast is shown or not."""
+    import asyncio as _asyncio
+    import time
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.layout import Layout
+    from prompt_toolkit.output import DummyOutput
+    from rttt.ui import create_layout
+
+    state = State()
+    root, input_field, terminal_window, logger_window = create_layout(state, None)
+    heights = {}
+
+    async def main():
+        with create_pipe_input() as inp:
+            app = Application(
+                layout=Layout(root, focused_element=input_field),
+                full_screen=True,
+                input=inp,
+                output=DummyOutput(),
+            )
+            state.set_app(app)
+
+            async def probe():
+                await _asyncio.sleep(0.05)
+                app.renderer.render(app, app.layout)
+                heights['no_toast'] = (
+                    terminal_window.window.render_info.window_height,
+                    logger_window.window.render_info.window_height,
+                )
+                # Also confirm the layout has no dedicated toast strip sibling.
+                assert len(root.content.children) == 4
+
+                state.message = 'Copied 10 chars — resumed'
+                state.message_expires = time.monotonic() + 60
+                app.invalidate()
+                await _asyncio.sleep(0.05)
+                app.renderer.render(app, app.layout)
+                heights['toast'] = (
+                    terminal_window.window.render_info.window_height,
+                    logger_window.window.render_info.window_height,
+                )
+                app.exit()
+
+            app.create_background_task(probe())
+            await app.run_async()
+
+    _asyncio.run(main())
+    assert heights['no_toast'][0] > 0 and heights['no_toast'][1] > 0
+    assert heights['no_toast'] == heights['toast'], (
+        f'toast shifted panes: without={heights["no_toast"]} with={heights["toast"]}'
+    )
