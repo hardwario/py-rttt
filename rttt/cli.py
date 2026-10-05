@@ -6,7 +6,11 @@ import pylink
 from dataclasses import dataclass, field
 from loguru import logger
 from rttt import __version__ as version
-from rttt.connectors import PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, MCPPortInUseError, SubstitutionMiddleware
+from rttt.connectors import (
+    PyLinkRTTConnector, FileLogMiddleware, MCPMiddleware, MCPPortInUseError,
+    SubstitutionMiddleware, DemoConnector,
+)
+from rttt.connectors.demo import DEMO_SERIAL
 from rttt.console import Console
 from rttt.shell_trust import ensure_shell_trust
 from rttt.utils import load_configs
@@ -41,9 +45,99 @@ class IntOrHexParamType(click.ParamType):
             self.fail(f'{value} is not a valid integer or hex value', param, ctx)
 
 
+class SerialParamType(click.ParamType):
+    """J-Link serial number, or the DEMO probe token."""
+
+    name = 'serial'
+
+    def convert(self, value, param, ctx):
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if text.upper() == DEMO_SERIAL:
+            return DEMO_SERIAL
+        try:
+            return int(text, 0)
+        except ValueError:
+            self.fail(
+                f'{value} is not a valid J-Link serial number or {DEMO_SERIAL}',
+                param,
+                ctx,
+            )
+
+
+def _wrap_common_middleware(connector, *, substitutions, app, mcp, mcp_listen,
+                            mcp_token, console_file, device, serial):
+    if substitutions:
+        connector = SubstitutionMiddleware(
+            connector, substitutions=app.config.get('substitutions'))
+
+    if mcp:
+        try:
+            connector = MCPMiddleware(connector, listen=mcp_listen, token=mcp_token)
+        except MCPPortInUseError as e:
+            raise click.ClickException(
+                f'MCP port {e.host}:{e.port} is already in use (another rttt instance?).\n'
+                f'       Use --mcp-listen {e.host}:{e.port + 1} to pick a different port, '
+                f'or --no-mcp to disable the MCP server.'
+            ) from e
+
+    if console_file:
+        text = f'Device: {device} J-Link sn: {serial}' if serial else f'Device: {device}'
+        connector = FileLogMiddleware(connector, console_file, text=text)
+    return connector
+
+
+def _build_demo_connector(*, device, serial, auto_reconnect, substitutions, app,
+                          mcp, mcp_listen, mcp_token, console_file):
+    """Build the DEMO probe path — same middleware stack, no J-Link DLL."""
+    device = device or DEMO_SERIAL
+    logger.info(f'Demo probe SN={serial} device={device}')
+    connector = DemoConnector(auto_reconnect=auto_reconnect)
+    return _wrap_common_middleware(
+        connector, substitutions=substitutions, app=app, mcp=mcp,
+        mcp_listen=mcp_listen, mcp_token=mcp_token, console_file=console_file,
+        device=device, serial=serial,
+    )
+
+
+
+def _prepare_tty_for_console():
+    """Avoid a one-shot trust answer leaving stdin at EOF for the TUI."""
+    try:
+        import termios
+        if sys.stdin.isatty():
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            return
+    except Exception:
+        pass
+    if not sys.stdin.isatty():
+        try:
+            sys.stdin = open('/dev/tty', 'r')
+        except OSError as e:
+            logger.warning(f'TUI stdin is not a tty and /dev/tty failed: {e}')
+
+
+def _run_headless(connector, mcp_listen):
+    connector.open()
+    click.echo(f'MCP server running on {mcp_listen}, press Ctrl+C to exit.')
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        connector.close()
+
+
 @click.command('rttt')
 @click.version_option(version, prog_name='rttt')
-@click.option('--serial', type=int, metavar='SERIAL_NUMBER', help='J-Link serial number', show_default=True)
+@click.option('--serial', type=SerialParamType(), metavar='SERIAL_NUMBER',
+              help=f'J-Link serial number, or {DEMO_SERIAL} for the built-in demo probe')
+@click.option('--demo', is_flag=True, default=False,
+              help=f'Use the built-in demo probe (same as --serial {DEMO_SERIAL})')
 @click.option('--device', type=str, metavar='DEVICE', help='J-Link Device name')
 @click.option('--speed', type=int, metavar="SPEED", help='J-Link clock speed in kHz', default=DEFAULT_JLINK_SPEED_KHZ, show_default=True)
 @click.option('--reset', is_flag=True, help='Reset application firmware.')
@@ -65,13 +159,30 @@ class IntOrHexParamType(click.ParamType):
 @click.option('--trust-shells', is_flag=True, default=False, help='Trust shell substitutions in config without interactive prompt (for CI/scripts).')
 @click.option('--headless', is_flag=True, default=False, help='Run without the interactive console, MCP server only (requires --mcp).')
 @click.pass_obj
-def cli(app: CliContext, serial, device, speed, reset, flash_cmd, address, terminal_buffer, logger_buffer, latency, auto_reconnect, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
+def cli(app: CliContext, serial, demo, device, speed, reset, flash_cmd, address, terminal_buffer, logger_buffer, latency, auto_reconnect, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     if headless and not mcp:
         raise click.ClickException('--headless requires the MCP server, add --mcp (or mcp: true in config).')
 
     ensure_shell_trust(app.sources, trust_shells, check_substitutions=substitutions)
+
+    if demo:
+        serial = DEMO_SERIAL
+
+    if serial == DEMO_SERIAL:
+        connector = _build_demo_connector(
+            device=device, serial=serial, auto_reconnect=auto_reconnect,
+            substitutions=substitutions, app=app, mcp=mcp, mcp_listen=mcp_listen,
+            mcp_token=mcp_token, console_file=console_file,
+        )
+        if headless:
+            _run_headless(connector, mcp_listen)
+            return
+        _prepare_tty_for_console()
+        console = Console(connector, history_file=history_file)
+        console.run()
+        return
 
     if not device:
         device = click.prompt('Device')
@@ -125,35 +236,17 @@ def cli(app: CliContext, serial, device, speed, reset, flash_cmd, address, termi
                                    flash_cmd=flash_cmd, device=device, serial=serial, speed=speed,
                                    auto_reconnect=auto_reconnect)
 
-    if substitutions:
-        connector = SubstitutionMiddleware(connector, substitutions=app.config.get('substitutions'))
-
-    if mcp:
-        try:
-            connector = MCPMiddleware(connector, listen=mcp_listen, token=mcp_token)
-        except MCPPortInUseError as e:
-            raise click.ClickException(
-                f'MCP port {e.host}:{e.port} is already in use (another rttt instance?).\n'
-                f'       Use --mcp-listen {e.host}:{e.port + 1} to pick a different port, '
-                f'or --no-mcp to disable the MCP server.'
-            ) from e
-
-    if console_file:
-        text = f'Device: {device} J-Link sn: {serial}' if serial else f'Device: {device}'
-        connector = FileLogMiddleware(connector, console_file, text=text)
+    connector = _wrap_common_middleware(
+        connector, substitutions=substitutions, app=app, mcp=mcp,
+        mcp_listen=mcp_listen, mcp_token=mcp_token, console_file=console_file,
+        device=device, serial=serial,
+    )
 
     if headless:
-        connector.open()
-        click.echo(f'MCP server running on {mcp_listen}, press Ctrl+C to exit.')
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            connector.close()
+        _run_headless(connector, mcp_listen)
         return
 
+    _prepare_tty_for_console()
     console = Console(connector, history_file=history_file)
     console.run()
 
