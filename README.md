@@ -21,6 +21,7 @@ This package is particularly useful for **debugging, logging, and real-time data
 - **Real-time communication** with embedded devices via RTT.
 - **Support for multiple RTT buffers** (console and logger).
 - **Adjustable latency** for optimized readout.
+- **Log filter** (F7): substring, `re:…`, or `level:wrn` (wrn+err) over the capped Log.
 - **Bounded scrollback** per pane (`--max-lines`, default 10000; also `max_lines:` in `.rttt.yaml`).
 - **J-Link support** with configurable serial numbers, device types, and speeds.
 - **Command-line interface (CLI)** for quick and easy access.
@@ -126,6 +127,10 @@ Demo commands (type into Command, then Enter):
 | `disconnect` / `reconnect` | Simulate drop / re-attach |
 
 
+### Log filter
+
+**F7** opens a Filter field under the Device Log. Enter a substring (case-insensitive), `re:<regex>`, or `level:<dbg|inf|wrn|err>` (shows that level and above; e.g. `level:wrn` → wrn+err). The status bar shows `FILTER: <expr>`. Empty Enter or **Esc** clears the filter. Filtering is a view over the full capped Log; copy selects what is shown. Demo Log lines look like `# n.0 <I> log n` so level filters can be tried with `--demo`.
+
 ### Scrollback cap
 
 Each of the Terminal and Log panes keeps at most **`--max-lines`** lines (default **10000**, or `max_lines:` in `~/.rttt.yaml` / `.rttt.yaml`). When the count exceeds the limit by about 10%, the oldest lines are dropped in one batch back down to the limit (amortizes the string rebuild). Pause only stops auto-scroll — lines still append, and a paused viewport is shifted so it does not jump when oldest lines are trimmed. Line-number margins keep **absolute** numbers (an offset counter) so numbers do not restart at 1 after a trim. Set `--max-lines 0` to disable trimming.
@@ -175,10 +180,11 @@ Manual checklist:
 15. **Right-click paste**: right-click the Command line → focuses Command, inserts clipboard text (trailing newline stripped; first line only if multi-line), toast `Pasted N chars` or `Clipboard empty`. Over SSH, paste uses the last in-app copy (select something first).
 16. **F6 mouse toggle**: press F6 → status shows **F6 Mouse OFF**, terminal native drag-select works; F6 again restores in-app mouse. With mouse off, open a disconnect overlay → buttons still clickable (mouse forced on).
 17. **Keyboard selection**: focus Log or Terminal (F3/Tab/click), Shift+Up/Down/Left/Right (also Home/End, PageUp/PageDown) or Ctrl-A → **PAUSED**, highlight grows by lines/chars; Ctrl-C **or right-click** → `Copied N chars — resumed` when the pause was automatic. After F5 first, keyboard/RMB copy stays **PAUSED** (no `— resumed`); Esc clears highlight and only auto-pause resumes (manual F5 never lifted by Esc/copy/select). On the Command line, Ctrl-A / Shift+arrows / Ctrl-U still edit normally.
-18. **Edge-scroll drag**: press in Log/Terminal, drag above or below the pane (into status/frame) → selection extends while scrolling; release still copies. Wheel over a highlight scrolls without dropping the anchor.
-19. **PAUSED +N**: pause (F5 or drag), let lines stream → badge shows `PAUSED +N` (combined panes); resume clears the count; toast on the right still works.
-19. **Line-number gutter drag**: press on the Log/Terminal line-number margin, drag into text, release → copy starts on that line (not from the bottom); toast includes `— resumed` when scroll was on; no stuck highlight without **PAUSED**.
-19. **Toast on the right**: after a copy/paste, the message (`Copied N chars`, `— resumed`, `Pasted N chars`, …) appears on the right where the clock usually is; F5/F6 hints on the left stay readable; when the toast expires the clock comes back.
+18. **Log filter**: F7 → type `level:wrn` or a substring → Log shows matches; status has `FILTER: …`; Esc clears; copy still works on visible lines.
+19. **Edge-scroll drag**: press in Log/Terminal, drag above or below the pane (into status/frame) → selection extends while scrolling; release still copies. Wheel over a highlight scrolls without dropping the anchor.
+20. **PAUSED +N**: pause (F5 or drag), let lines stream → badge shows `PAUSED +N` (combined panes); resume clears the count; toast on the right still works.
+21. **Line-number gutter drag**: press on the Log/Terminal line-number margin, drag into text, release → copy starts on that line (not from the bottom); toast includes `— resumed` when scroll was on; no stuck highlight without **PAUSED**.
+22. **Toast on the right**: after a copy/paste, the message (`Copied N chars`, `— resumed`, `Pasted N chars`, …) appears on the right where the clock usually is; F5/F6 hints on the left stay readable; when the toast expires the clock comes back.
 
 **Limits:** some VTE-based terminals (older GNOME Terminal) ignore or cap OSC 52; very large selections are truncated (~60k characters).
 

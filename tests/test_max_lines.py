@@ -14,7 +14,7 @@ def test_default_max_lines_constant():
 
 def test_trim_drops_oldest_when_over_hysteresis():
     console = Console(DemoConnector(delay=10), history_file=None, max_lines=100)
-    buf = console.logger_buffer
+    buf = console.terminal_buffer
     # Cross the 110% threshold → one trim down to max.
     for i in range(111):
         console._buffer_insert_text(buf, f'log {i}\n')
@@ -26,7 +26,7 @@ def test_trim_drops_oldest_when_over_hysteresis():
 
 def test_trim_shifts_sticky_selection():
     console = Console(DemoConnector(delay=10), history_file=None, max_lines=50)
-    buf = console.logger_buffer
+    buf = console.terminal_buffer
     console.state.scroll_to_end = False
     console._pause_origin = 'manual'
     for i in range(40):
@@ -46,7 +46,7 @@ def test_trim_shifts_sticky_selection():
 
 def test_trim_during_paused_drag_keeps_selection():
     console = Console(DemoConnector(delay=10), history_file=None, max_lines=30)
-    buf = console.logger_buffer
+    buf = console.terminal_buffer
     console.state.scroll_to_end = False
     console._pause_origin = 'manual'
     for i in range(25):
@@ -67,7 +67,7 @@ def test_trim_during_paused_drag_keeps_selection():
 
 def test_trim_drops_selection_fully_trimmed_away():
     console = Console(DemoConnector(delay=10), history_file=None, max_lines=20)
-    buf = console.logger_buffer
+    buf = console.terminal_buffer
     console.state.scroll_to_end = False
     console._pause_origin = 'manual'
     for i in range(15):
@@ -84,8 +84,8 @@ def test_trim_drops_selection_fully_trimmed_away():
 
 def test_paused_vertical_scroll_adjusted_on_trim():
     console = Console(DemoConnector(delay=10), history_file=None, max_lines=20)
-    buf = console.logger_buffer
-    window = console.logger_window.window
+    buf = console.terminal_buffer
+    window = console.terminal_window.window
     console.state.scroll_to_end = False
     console._pause_origin = 'manual'
     for i in range(18):
@@ -109,7 +109,7 @@ def test_cli_max_lines_option():
 
 def test_max_lines_zero_disables_trim():
     console = Console(DemoConnector(delay=10), history_file=None, max_lines=0)
-    buf = console.logger_buffer
+    buf = console.terminal_buffer
     for i in range(50):
         console._buffer_insert_text(buf, f'x {i}\n')
     assert buf.text.count('\n') == 50

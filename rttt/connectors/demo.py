@@ -42,7 +42,7 @@ class DemoConnector(Connector):
         '  help              Show this list\n'
         '  rate              Print current lines/sec\n'
         '  rate <n>          Set lines/sec (e.g. rate 20)\n'
-        '  burst <n>         Emit n lines immediately\n'
+        '  burst <n>         Emit n lines immediately\n'        '  (log lines use # n.0 <D|I|W|E> for filter level:)\n'
         '  disconnect        Simulate link drop\n'
         '  reconnect         Re-attach (also F4 / overlay)'
     )
@@ -132,7 +132,9 @@ class DemoConnector(Connector):
                     self.i += 1
                     k = self.i
                     if k % 2 == 0:
-                        batch.append(Event(EventType.LOG, f'log {k}'))
+                        lvl = ('D', 'I', 'W', 'E')[(k // 2) % 4]
+                        batch.append(Event(
+                            EventType.LOG, f'# {k}.0 <{lvl}> log {k}'))
                     else:
                         batch.append(Event(EventType.OUT, f'term {k}'))
         if not alive:
@@ -223,7 +225,10 @@ class DemoConnector(Connector):
                     n = self.i
             if emit_now:
                 if n % 2 == 0:
-                    self._emit(Event(EventType.LOG, f'log {n}'))
+                    # Rotate dbg/inf/wrn/err so Log filter level: presets work.
+                    lvl = ('D', 'I', 'W', 'E')[(n // 2) % 4]
+                    self._emit(Event(
+                        EventType.LOG, f'# {n}.0 <{lvl}> log {n}'))
                 else:
                     self._emit(Event(EventType.OUT, f'term {n}'))
             time.sleep(self.delay)
