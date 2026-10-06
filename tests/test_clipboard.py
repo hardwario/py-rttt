@@ -939,9 +939,9 @@ def test_keyboard_selection_auto_pauses_and_ctrl_c_resumes():
     right(None)
     assert console.state.scroll_to_end is False
     assert console._pause_origin == 'auto'
-    assert console._selected_text(buf) == 'he'
+    assert console._selected_text(buf) == 'he'  # exclusive end while selecting
 
-    # Ctrl-C path: auto-resume with — resumed toast.
+    # Ctrl-C path: auto-resume with — resumed toast; copy includes cursor cell.
     cc = _binding(console, 'controlc')
     assert cc is not None
     cc(None)
@@ -950,7 +950,7 @@ def test_keyboard_selection_auto_pauses_and_ctrl_c_resumes():
     assert console.state.scroll_to_end is True
     assert console._pause_origin is None
     assert buf.selection_state is None
-    assert console.app.clipboard.get_data().text == 'he'
+    assert console.app.clipboard.get_data().text == 'hel'
 
 
 def test_keyboard_selection_after_manual_f5_stays_paused():
@@ -1226,6 +1226,7 @@ def test_ctrl_u_clears_command_line_not_stolen_by_page_nav():
     assert handler is not None, 'Ctrl-U is not bound for Command'
     handler(None)
     assert buf.text == ''
+
 def test_missed_mouse_down_still_anchors_at_move_cell():
     """MOVE with button held and no prior DOWN must not select from buffer end."""
     from prompt_toolkit.application.current import create_app_session
@@ -1320,3 +1321,22 @@ def test_gutter_bridge_forwards_press_as_column_zero():
     assert x == 0, seen
     assert typ == MouseEventType.MOUSE_DOWN
 
+
+def test_keyboard_copy_includes_cursor_cell():
+    """Copied text must match the cells that look selected (incl. under cursor)."""
+    from prompt_toolkit.document import Document
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    buf.set_document(Document('29xx'), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    buf.cursor_position = 0
+    _binding(console, 'shiftright')(None)  # exclusive end at 1 → looks like '2' + cursor on '9'
+    assert console._selected_text(buf) == '2'
+    console._ctrl_c_copy()
+    assert console._last_copied == '29', console._last_copied
