@@ -112,6 +112,17 @@ rttt --demo
 
 The demo emits synthetic terminal/log lines, reports `CONN connected`, and supports reconnect via **F4**, the overlay **Reconnect** button, or by typing `reconnect` in the command field. Type `disconnect` to simulate a drop and exercise the Connection overlay (output pauses until reconnect succeeds).
 
+Demo commands (type into Command, then Enter):
+
+| Command | Effect |
+|---|---|
+| `help` | List demo commands |
+| `rate` | Print current lines/sec |
+| `rate <n>` | Set stream speed (e.g. `rate 20`) |
+| `burst <n>` | Emit *n* lines immediately (selection stress) |
+| `disconnect` / `reconnect` | Simulate drop / re-attach |
+
+
 ### Clipboard (SSH / tmux)
 
 Copy uses a hybrid clipboard: **OSC 52** (works over SSH into the local terminal) plus **pyperclip** when a local GUI display is available. Select text with the mouse to auto-copy from **one pane only** (Interactive Terminal *or* Device Log — never both merged). A real drag (mouse move with the button held) **auto-pauses** scroll so streaming lines do not jump the viewport; a plain click does not pause. While paused (manual **F5** or auto during drag / keyboard selection), the status bar shows a highlighted **PAUSED** marker and the F5 hint switches to **F5 Resume** (back to **F5 Pause** when streaming). After a successful select-to-copy, if scroll was running before the selection, streaming **auto-resumes** and the highlight clears (toast `Copied N chars — resumed`). If you had paused with **F5** first, the pause and highlight stay so you can keep reading. Toasts appear **on the right of the status bar**, temporarily replacing the clock (left hints stay visible; pane heights do not change). **Ctrl-C** / **Ctrl-Insert** copies the focused pane's selection (or re-toasts the last single-pane copy). **Shift+Arrows / Home / End / PageUp / PageDown** and **Ctrl-A** extend or select-all in the focused Log/Terminal pane (Command keeps its normal editing keys). Many terminals (including **xfce4-terminal**) steal **Shift+Up/Down** and **Shift+PageUp/Down** for their own scrollback, so those keys never reach `rttt` — use **Shift+Left/Right** (they already cross line boundaries) or the mouse instead. The first keyboard extension while streaming auto-pauses like a drag, and **Esc** clears the highlight (and auto-resumes only if the pause was automatic — never after F5). Right-click copy uses the same auto/manual resume rules as Ctrl-C. **F6** toggles mouse reporting off so the terminal emulator's own selection works across panes or when the in-app clipboard path is unavailable (Connection overlay still forces mouse on for its buttons). **Right-click** on Log/Terminal copies the selection in that pane (same path as Ctrl-C; no selection → re-toast last copy or `Nothing selected`). **Right-click** on the Command line pastes (local pyperclip when available; otherwise the in-app last copy — no OSC 52 clipboard *read*). Multi-line paste keeps the first line only (Command is single-line). Hold **Shift** while dragging for the terminal's native selection when the emulator supports that bypass. Exit with **Ctrl-Q** if **F10** is captured by the desktop (e.g. XFCE).

@@ -175,3 +175,29 @@ def test_demo_stops_output_while_disconnected():
     n2 = len([e for e in events if e.type in (EventType.OUT, EventType.LOG)])
     conn.close()
     assert n2 == n, f'leaked {n2 - n} OUT/LOG events while disconnected'
+
+def test_demo_help_rate_burst():
+    from rttt.event import Event, EventType
+    events = []
+    conn = DemoConnector(delay=0.5)
+    conn.on(events.append)
+    conn.open()
+    # help
+    conn.handle(Event(EventType.IN, 'help'))
+    outs = [e.data for e in events if e.type == EventType.OUT]
+    assert any('Demo commands' in str(o) and 'rate' in str(o) for o in outs)
+    # rate query + set
+    n0 = len(events)
+    conn.handle(Event(EventType.IN, 'rate'))
+    assert any('lines/sec' in str(e.data) for e in events[n0:] if e.type == EventType.OUT)
+    conn.handle(Event(EventType.IN, 'rate 50'))
+    assert abs(conn.delay - 0.02) < 1e-9
+    assert abs(conn._rate - 50) < 1e-9
+    # burst
+    n1 = len(events)
+    conn.handle(Event(EventType.IN, 'burst 5'))
+    produced = [e for e in events[n1:] if e.type in (EventType.OUT, EventType.LOG)]
+    # 5 burst lines + confirmation OUT
+    assert sum(1 for e in produced if str(e.data).startswith(('log ', 'term '))) == 5
+    assert any('burst: 5' in str(e.data) for e in produced)
+    conn.close()

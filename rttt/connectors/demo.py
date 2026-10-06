@@ -34,20 +34,25 @@ class DemoConnector(Connector):
         self._conn_up = None
         self._pause_output = False
         self._lock = threading.Lock()
+        # lines per second; delay = 1/rate. Default matches delay=0.5 → 2 Hz.
+        self._rate = (1.0 / delay) if delay else 2.0
+
+    _HELP = (
+        'Demo commands:\n'
+        '  help              Show this list\n'
+        '  rate              Print current lines/sec\n'
+        '  rate <n>          Set lines/sec (e.g. rate 20)\n'
+        '  burst <n>         Emit n lines immediately\n'
+        '  disconnect        Simulate link drop\n'
+        '  reconnect         Re-attach (also F4 / overlay)'
+    )
 
     def handle(self, event: Event):
         logger.info(f'handle: {event.type} {event.data}')
         # Echo input back as OUT so the interactive pane is usable in demo.
         if event.type == EventType.IN:
             text = event.data if isinstance(event.data, str) else str(event.data)
-            cmd = text.strip().lower()
-            if cmd in ('disconnect', 'demo disconnect'):
-                self._simulate_disconnect(
-                    'Demo disconnect (type reconnect, press F4, or click Reconnect)'
-                )
-                return
-            if cmd in ('reconnect', 'demo reconnect'):
-                self.request_reconnect()
+            if self._handle_demo_command(text):
                 return
             # While the link is down, do not echo — otherwise the pane looks
             # alive and the overlay's "disconnected" state is confusing.
@@ -55,6 +60,87 @@ class DemoConnector(Connector):
                 self._emit(Event(EventType.OUT, text))
             return
         self._emit(event)
+
+    def _handle_demo_command(self, text: str) -> bool:
+        """Run a built-in demo command. True if consumed (no echo)."""
+        raw = text.strip()
+        if not raw:
+            return False
+        parts = raw.split()
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        if cmd == 'help' or raw.lower() in ('demo help',):
+            self._emit(Event(EventType.OUT, self._HELP))
+            return True
+
+        if cmd == 'rate':
+            if not args:
+                self._emit(Event(
+                    EventType.OUT,
+                    f'Demo rate: {self._rate:g} lines/sec (delay {self.delay:g}s)'))
+                return True
+            try:
+                n = float(args[0])
+            except ValueError:
+                self._emit(Event(EventType.OUT, 'usage: rate <lines-per-second>'))
+                return True
+            if n <= 0:
+                self._emit(Event(EventType.OUT, 'rate must be > 0'))
+                return True
+            with self._lock:
+                self._rate = n
+                self.delay = 1.0 / n
+            self._emit(Event(
+                EventType.OUT, f'Demo rate set to {n:g} lines/sec'))
+            return True
+
+        if cmd == 'burst':
+            if len(args) != 1:
+                self._emit(Event(EventType.OUT, 'usage: burst <n>'))
+                return True
+            try:
+                n = int(args[0])
+            except ValueError:
+                self._emit(Event(EventType.OUT, 'usage: burst <n>'))
+                return True
+            if n < 0:
+                self._emit(Event(EventType.OUT, 'burst count must be >= 0'))
+                return True
+            self._burst(n)
+            return True
+
+        if cmd == 'disconnect' or raw.lower() == 'demo disconnect':
+            self._simulate_disconnect(
+                'Demo disconnect (type reconnect, press F4, or click Reconnect)'
+            )
+            return True
+        if cmd == 'reconnect' or raw.lower() == 'demo reconnect':
+            self.request_reconnect()
+            return True
+        return False
+
+    def _burst(self, n: int):
+        """Emit n LOG/OUT lines as fast as possible (for selection stress tests)."""
+        with self._lock:
+            if self._pause_output or self._conn_up is not True:
+                alive = False
+            else:
+                alive = True
+                batch = []
+                for _ in range(n):
+                    self.i += 1
+                    k = self.i
+                    if k % 2 == 0:
+                        batch.append(Event(EventType.LOG, f'log {k}'))
+                    else:
+                        batch.append(Event(EventType.OUT, f'term {k}'))
+        if not alive:
+            self._emit(Event(EventType.OUT, 'burst ignored (link down)'))
+            return
+        for ev in batch:
+            self._emit(ev)
+        self._emit(Event(EventType.OUT, f'Demo burst: {n} lines'))
 
     def open(self):
         super().open()
