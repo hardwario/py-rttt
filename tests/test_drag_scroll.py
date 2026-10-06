@@ -83,3 +83,52 @@ def test_wheel_during_selection_keeps_anchor():
     handler(ev)
     assert buf.selection_state is not None
     assert buf.selection_state.original_cursor_position == anchor
+
+
+def test_edge_scroll_start_without_app_loop_steps_once():
+    """No running app → one immediate scroll step (unit-test path)."""
+    console = Console(DemoConnector(delay=10), history_file=None)
+    buf = _fill(console, 40)
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    start = buf.text.index('line 30')
+    buf.selection_state = SelectionState(start, SelectionType.CHARACTERS)
+    buf.cursor_position = start + 4
+    console._drag_buffer = buf
+    window = console.logger_window.window
+    window.vertical_scroll = 20
+
+    # Fake render_info so _drag_scroll_and_extend can run.
+    class _Info:
+        content_height = 40
+        window_height = 10
+
+    window.render_info = _Info()
+    before = window.vertical_scroll
+    console._start_edge_scroll(direction=-1, distance=4)
+    assert window.vertical_scroll == before - 1
+    assert console._edge_scroll_dir == -1
+    console._stop_edge_scroll()
+    assert console._edge_scroll_dir == 0
+
+
+def test_drag_scroll_updates_pinned_scroll():
+    console = Console(DemoConnector(delay=10), history_file=None)
+    buf = _fill(console, 40)
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    console._pinned_scroll[buf] = 20
+    window = console.logger_window.window
+    window.vertical_scroll = 20
+
+    class _Info:
+        content_height = 40
+        window_height = 10
+
+    window.render_info = _Info()
+    start = buf.text.index('line 25')
+    buf.selection_state = SelectionState(start, SelectionType.CHARACTERS)
+    buf.cursor_position = start + 3
+    console._drag_scroll_and_extend(buf, direction=-1, steps=3)
+    assert window.vertical_scroll == 17
+    assert console._pinned_scroll[buf] == 17
