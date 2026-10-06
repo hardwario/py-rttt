@@ -1226,3 +1226,97 @@ def test_ctrl_u_clears_command_line_not_stolen_by_page_nav():
     assert handler is not None, 'Ctrl-U is not bound for Command'
     handler(None)
     assert buf.text == ''
+def test_missed_mouse_down_still_anchors_at_move_cell():
+    """MOVE with button held and no prior DOWN must not select from buffer end."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.output import DummyOutput
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    # Multi-line buffer; cursor left at the end (scroll tip).
+    text = ''.join(f'line {i:02d} content\n' for i in range(20))
+    buf, handler, ev = _mouse_harness(console, console.logger_window, text)
+    buf.cursor_position = len(buf.text)
+    end = buf.cursor_position
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            console.app.layout.focus(console.input_field)
+            console.state.scroll_to_end = True
+            console._pause_origin = None
+
+            # No MOUSE_DOWN — simulates a press that landed on the gutter.
+            # First MOVE synthesizes DOWN at that cell (no selection yet —
+            # same position). Second MOVE extends the selection and pauses.
+            handler(ev(4, MouseEventType.MOUSE_MOVE))
+            assert console._drag_buffer is buf
+            assert buf.cursor_position == 4, buf.cursor_position
+            handler(ev(10, MouseEventType.MOUSE_MOVE))
+            assert console._pause_origin == 'auto'
+            assert not console.state.scroll_to_end
+            handler(ev(10, MouseEventType.MOUSE_UP))
+
+            copied = console._last_copied
+            assert copied, 'expected a copy after gutter-miss drag'
+            assert not copied.startswith('\n'), copied
+            # Must not be a giant selection from the old scroll tip.
+            assert end - 4 not in (len(copied),), (len(copied), end)
+            assert len(copied) < 80, (len(copied), copied)
+            assert 'resumed' in console.state.message or console.state.scroll_to_end
+
+
+def test_gutter_bridge_forwards_press_as_column_zero():
+    """Line-number margin hits are forwarded as (col=0, row)."""
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+    from prompt_toolkit.layout.screen import Screen, WritePosition
+    from prompt_toolkit.mouse_events import MouseEvent, MouseEventType, MouseButton
+    from prompt_toolkit.output import DummyOutput
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    text = 'alpha\nbeta\ngamma\n'
+    console.logger_buffer.set_document(Document(text), bypass_readonly=True)
+    window = console.logger_window.window
+
+    seen = []
+    real = console.logger_window.control.mouse_handler
+
+    def spy(ev):
+        seen.append((ev.position.x, ev.position.y, ev.event_type))
+        return real(ev)
+
+    console.logger_window.control.mouse_handler = spy
+
+    # create_content may schedule history load; no-op it for this unit render.
+    Buffer.load_history_if_not_yet_loaded = lambda self: None
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()) as session:
+            session.app = console.app
+            screen = Screen()
+            handlers = MouseHandlers()
+            wp = WritePosition(xpos=0, ypos=0, width=40, height=10)
+            window.write_to_screen(screen, handlers, wp, '', False, None)
+            gutter_fn = handlers.mouse_handlers[1][0]
+            gutter_fn(MouseEvent(
+                position=Point(x=0, y=1),
+                event_type=MouseEventType.MOUSE_DOWN,
+                button=MouseButton.LEFT,
+                modifiers=frozenset(),
+            ))
+    assert seen, 'gutter press did not reach buffer handler'
+    x, y, typ = seen[0]
+    assert x == 0, seen
+    assert typ == MouseEventType.MOUSE_DOWN
+

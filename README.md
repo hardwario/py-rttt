@@ -157,7 +157,8 @@ Manual checklist:
 15. **Right-click paste**: right-click the Command line → focuses Command, inserts clipboard text (trailing newline stripped; first line only if multi-line), toast `Pasted N chars` or `Clipboard empty`. Over SSH, paste uses the last in-app copy (select something first).
 16. **F6 mouse toggle**: press F6 → status shows **F6 Mouse OFF**, terminal native drag-select works; F6 again restores in-app mouse. With mouse off, open a disconnect overlay → buttons still clickable (mouse forced on).
 17. **Keyboard selection**: focus Log or Terminal (F3/Tab/click), Shift+Up/Down/Left/Right (also Home/End, PageUp/PageDown) or Ctrl-A → **PAUSED**, highlight grows by lines/chars; Ctrl-C **or right-click** → `Copied N chars — resumed` when the pause was automatic. After F5 first, keyboard/RMB copy stays **PAUSED** (no `— resumed`); Esc clears highlight and only auto-pause resumes (manual F5 never lifted by Esc/copy/select). On the Command line, Ctrl-A / Shift+arrows / Ctrl-U still edit normally.
-18. **Toast on the right**: after a copy/paste, the message (`Copied N chars`, `— resumed`, `Pasted N chars`, …) appears on the right where the clock usually is; F5/F6 hints on the left stay readable; when the toast expires the clock comes back.
+18. **Line-number gutter drag**: press on the Log/Terminal line-number margin, drag into text, release → copy starts on that line (not from the bottom); toast includes `— resumed` when scroll was on; no stuck highlight without **PAUSED**.
+19. **Toast on the right**: after a copy/paste, the message (`Copied N chars`, `— resumed`, `Pasted N chars`, …) appears on the right where the clock usually is; F5/F6 hints on the left stay readable; when the toast expires the clock comes back.
 
 **Limits:** some VTE-based terminals (older GNOME Terminal) ignore or cap OSC 52; very large selections are truncated (~60k characters).
 

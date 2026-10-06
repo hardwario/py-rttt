@@ -406,3 +406,24 @@ def test_shift_up_extends_selection_then_ctrl_c_copies(pty_app):
     # Manual F5 pause must survive keyboard copy.
     assert 'PAUSED' in app.status()
     assert 'resumed' not in app.status()
+
+def test_gutter_press_drag_copies_from_press_line(pty_app):
+    """Press on the line-number gutter then drag — copy starts on that line."""
+    app = pty_app
+    app.press_f5()
+    assert 'PAUSED' in app.status()
+    logs = app.list_pane_lines('log', 'log')
+    assert len(logs) >= 4, logs
+    a, b = logs[0], logs[2]
+    n = len(app.osc_copies)
+    # Log text starts after "││ N " — press on the digit (gutter), not the text.
+    # Screen looks like: …││ 1 log 2…  so gutter x is a few cells left of text.
+    gutter_x = a[1] - 2
+    assert gutter_x > 60, (gutter_x, a)
+    app.drag(a[0], gutter_x, b[0], b[1] + len(b[2]) - 1)
+    assert app.osc_copies[n:], 'gutter-origin drag copied nothing'
+    text = app.osc_copies[n]
+    assert text.startswith(a[2]), (text, a[2])
+    assert b[2] in text, text
+    # Must not be a huge tail from the scroll tip.
+    assert text.count('\n') < 15, text

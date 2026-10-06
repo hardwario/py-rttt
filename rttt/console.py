@@ -10,7 +10,8 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
 from prompt_toolkit.document import Document
 from prompt_toolkit.clipboard.base import ClipboardData
-from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.selection import SelectionState, SelectionType
 from rttt.clipboard import HybridClipboard
 from rttt.ui import State, create_layout
@@ -508,9 +509,85 @@ class Console:
             return self.logger_buffer
         return None
 
+    def _seed_drag(self, buf, control):
+        """Record drag bookkeeping shared by content and gutter presses."""
+        self._drag_buffer = buf
+        self._paused_for_drag = False
+        self._drag_was_scrolling = self.state.scroll_to_end
+        try:
+            if self.app is not None:
+                self.app.layout.current_control = control
+        except Exception:
+            pass
+        self._clear_other_pane_selection(buf)
+        if self._selection_span is not None and self._selection_span[0] is buf:
+            self._selection_span = None
+
+    def _install_gutter_mouse_bridge(self, text_area):
+        """Route line-number margin clicks into the buffer mouse handler.
+
+        prompt_toolkit only registers the BufferControl handler for the text
+        area, not the NumberedMargin. A press on the gutter therefore never
+        sees MOUSE_DOWN — only MOVE/UP after the pointer enters the text —
+        and BufferControl anchors the selection at the old cursor (usually the
+        bottom). Map gutter hits to column 0 of that row so the press is the
+        real start of the drag.
+        """
+        window = text_area.window
+        control = text_area.control
+        orig_write = window.write_to_screen
+
+        def write_to_screen(screen, mouse_handlers, write_position,
+                            parent_style, erase_bg, z_index):
+            result = orig_write(
+                screen, mouse_handlers, write_position,
+                parent_style, erase_bg, z_index)
+            info = window.render_info
+            if info is None or not window.left_margins:
+                return result
+            try:
+                left_w = sum(window._get_margin_width(m) for m in window.left_margins)
+            except Exception:
+                return result
+            if left_w <= 0:
+                return result
+
+            def gutter_mouse(mouse_event):
+                rel_y = mouse_event.position.y - write_position.ypos
+                if rel_y < 0:
+                    return NotImplemented
+                row_col = info.visible_line_to_row_col.get(rel_y)
+                if row_col is None:
+                    # Clamp to the last mapped visible line when past content.
+                    if not info.visible_line_to_row_col:
+                        return NotImplemented
+                    rel_y = max(0, min(rel_y, max(info.visible_line_to_row_col)))
+                    row_col = info.visible_line_to_row_col.get(rel_y)
+                    if row_col is None:
+                        return NotImplemented
+                row, _col = row_col
+                return control.mouse_handler(MouseEvent(
+                    position=Point(x=0, y=row),
+                    event_type=mouse_event.event_type,
+                    button=mouse_event.button,
+                    modifiers=mouse_event.modifiers,
+                ))
+
+            mouse_handlers.set_mouse_handler_for_range(
+                x_min=write_position.xpos,
+                x_max=write_position.xpos + left_w,
+                y_min=write_position.ypos,
+                y_max=write_position.ypos + write_position.height,
+                handler=gutter_mouse,
+            )
+            return result
+
+        window.write_to_screen = write_to_screen
+
     def _install_select_to_copy(self, text_area):
         control = text_area.control
         original = control.mouse_handler
+        self._install_gutter_mouse_bridge(text_area)
 
         def mouse_handler(mouse_event):
             # Focus on press so the first drag (Command still focused) can
@@ -524,19 +601,27 @@ class Console:
                 if mouse_event.event_type == MouseEventType.MOUSE_UP:
                     self._right_click_copy_pane(buf)
                 return None
+
+            # Missed MOUSE_DOWN (gutter press before the bridge, or any path
+            # that delivers MOVE with a button held first): seed the drag and
+            # synthesize DOWN so the selection anchors here — not at the old
+            # scroll-tip cursor.
+            if all((
+                mouse_event.event_type == MouseEventType.MOUSE_MOVE,
+                self._drag_buffer is None,
+                mouse_event.button != MouseButton.NONE,
+                mouse_event.button != MouseButton.RIGHT,
+            )):
+                self._seed_drag(buf, control)
+                original(MouseEvent(
+                    position=mouse_event.position,
+                    event_type=MouseEventType.MOUSE_DOWN,
+                    button=mouse_event.button,
+                    modifiers=mouse_event.modifiers,
+                ))
+
             if mouse_event.event_type == MouseEventType.MOUSE_DOWN:
-                self._drag_buffer = buf
-                self._paused_for_drag = False
-                self._drag_was_scrolling = self.state.scroll_to_end
-                try:
-                    if self.app is not None:
-                        self.app.layout.current_control = control
-                except Exception:
-                    pass
-                self._clear_other_pane_selection(buf)
-                # New click replaces any sticky selection on this buffer.
-                if self._selection_span is not None and self._selection_span[0] is buf:
-                    self._selection_span = None
+                self._seed_drag(buf, control)
 
             result = original(mouse_event)
 
@@ -579,6 +664,13 @@ class Console:
                     self._resume_streaming_after_copy()
                     self.state.show_message(
                         f'Copied {n} char{"s" if n != 1 else ""} — resumed')
+                elif copied and self.state.scroll_to_end:
+                    # Copied without an auto-pause (should be rare). A sticky
+                    # highlight would pin the viewport while follow is on —
+                    # clear it so the pane keeps streaming.
+                    self._selection_span = None
+                    buf.exit_selection()
+                    buf.cursor_position = len(buf.text)
                 elif not copied and auto_paused:
                     # Aborted drag that had auto-paused — do not leave Pause on.
                     self._resume_streaming_after_copy()
