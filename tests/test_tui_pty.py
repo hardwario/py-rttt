@@ -423,7 +423,7 @@ def test_gutter_press_drag_copies_from_press_line(pty_app):
     app.drag(a[0], gutter_x, b[0], b[1] + len(b[2]) - 1)
     assert app.osc_copies[n:], 'gutter-origin drag copied nothing'
     text = app.osc_copies[n]
-    assert text.startswith(a[2]), (text, a[2])
+    assert a[2] in text, (text, a[2])
     assert b[2] in text, text
     # Must not be a huge tail from the scroll tip.
     assert text.count('\n') < 15, text

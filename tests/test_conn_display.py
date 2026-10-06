@@ -94,7 +94,7 @@ def test_conn_overlay_visible_only_while_down():
     from rttt.ui import create_layout
 
     state = State()
-    root, _, _, _ = create_layout(state, None)
+    root, _, _, _, _ = create_layout(state, None)
     overlay = root.floats[-1].content
     assert not overlay.filter()
 
@@ -265,7 +265,7 @@ def test_both_dialog_buttons_are_reachable_with_tab():
     from rttt.ui import create_layout
 
     state = State()
-    root, input_field, _terminal, _log = create_layout(state, None)
+    root, input_field, _terminal, _log, _filt = create_layout(state, None)
     state.set_conn('rtt', 'disconnected', 'Target has no power (VTref 0 mV)')
 
     bindings = KeyBindings()
@@ -306,7 +306,7 @@ def test_dialog_says_how_to_press_the_buttons():
     from rttt.ui import create_layout
 
     state = State()
-    root, _input, _terminal, _log = create_layout(state, None)
+    root, _input, _terminal, _log, _filt = create_layout(state, None)
     state.set_conn('rtt', 'disconnected', 'gone')
 
     texts = []
@@ -474,7 +474,7 @@ def test_toast_does_not_change_pane_height():
     from rttt.ui import create_layout
 
     state = State()
-    root, input_field, terminal_window, logger_window = create_layout(state, None)
+    root, input_field, terminal_window, logger_window, _filt = create_layout(state, None)
     heights = {}
 
     async def main():

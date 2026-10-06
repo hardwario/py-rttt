@@ -46,6 +46,9 @@ class State:
         self.message_expires = 0.0
         # Lines appended to either pane while paused (combined); for badge.
         self.paused_appended = 0
+        # Log filter expression (None/'' = show all); status shows FILTER: …
+        self.log_filter = ''
+        self.filter_editing = False
 
     def show_message(self, text, seconds=2.0):
         """Show an ephemeral toast on the right of the status bar (replaces clock)."""
@@ -307,11 +310,14 @@ def create_status_bar(state):
         f5_label = ' F5 Resume ' if paused else ' F5 Pause '
         f6_style = 'class:title' if state.mouse_enabled else 'class:yellow'
         f6_label = ' F6 Mouse ' if state.mouse_enabled else ' F6 Mouse OFF '
+        if state.log_filter:
+            items.append(('class:yellow', f' FILTER: {state.log_filter} '))
         items.extend([
             ('class:title', ' F3 Focus '),
             ('class:title', ' F4 Reconn '),
             (f5_style, f5_label),
             (f6_style, f6_label),
+            ('class:title', ' F7 Filter '),
             ('class:title', ' F8 Clear '),
             ('class:title', ' Ctrl-Q Quit '),
             ('class:title', ' Ctrl-C Copy '),
@@ -372,9 +378,22 @@ def create_layout(state, history_file):
         ]
     )
 
+    filter_field = TextArea(
+        height=1,
+        prompt='Filter: ',
+        style='class:input-field',
+        multiline=False,
+        wrap_lines=False,
+        focusable=True,
+    )
+    filter_bar = ConditionalContainer(
+        content=filter_field,
+        filter=Condition(lambda: state.filter_editing or bool(state.log_filter)),
+    )
     hs_logger = HSplit([
         logger_window,
-        logger_search
+        logger_search,
+        filter_bar,
     ])
 
     flash_bar = ProgressBar()
@@ -493,4 +512,4 @@ def create_layout(state, history_file):
         style="bg:#111111 fg:#eeeeee",
     )
 
-    return root_container, input_field, terminal_window, logger_window
+    return root_container, input_field, terminal_window, logger_window, filter_field

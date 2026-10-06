@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 from loguru import logger
 from prompt_toolkit.application import Application
@@ -40,6 +41,10 @@ class Console:
         self._line_offset = {}  # Buffer -> int
         # Screen geometry of each pane content area (updated on render).
         self._pane_geom = {}  # Buffer -> dict
+        # Full capped Log history; logger_buffer is a (filtered) view.
+        self._log_lines = []
+        self._log_filter_re = None  # compiled regex or None
+        self._log_filter_min_level = None  # int or None
         self._drag_buffer = None  # buffer under an in-progress mouse drag, if any
         # True when THIS drag flipped scroll_to_end off (pause deferred to MOVE).
         self._paused_for_drag = False
@@ -60,7 +65,8 @@ class Console:
             if d:
                 os.makedirs(d, exist_ok=True)
 
-        root_container, input_field, terminal_window, logger_window = create_layout(self.state, history_file)
+        root_container, input_field, terminal_window, logger_window, filter_field = create_layout(self.state, history_file)
+        self.filter_field = filter_field
         self.input_field = input_field
         self.input_field.accept_handler = self._input_accept_handler
         self.terminal_window = terminal_window
@@ -80,6 +86,10 @@ class Console:
             self.state.toggle_mouse()
             if self.app:
                 self.app.invalidate()
+
+        @bindings.add("f7", eager=True)
+        def _(event):
+            self._open_log_filter()
 
         def _pane_focused():
             # Require a pane focus and exclude Command so eager Ctrl-A / Shift
@@ -132,6 +142,8 @@ class Console:
             self._keyboard_select_all()
 
         def _escape_clears_selection():
+            if self.state.filter_editing:
+                return False
             if self._pause_origin == 'auto':
                 return True
             if self._selection_span is not None:
@@ -139,11 +151,16 @@ class Console:
             for buf in (self.terminal_buffer, self.logger_buffer):
                 if buf.selection_state is not None:
                     return True
+            if self.state.log_filter:
+                return True
             return False
 
         @bindings.add("escape", filter=Condition(_escape_clears_selection), eager=True)
         def _(event):
-            self._clear_pane_selection_on_escape()
+            if self._clear_pane_selection_on_escape():
+                return
+            if self.state.log_filter:
+                self._clear_log_filter()
 
         # Vi page-navigation binds Ctrl-U to half-page scroll; keep unix-line
         # discard on the Command line (readline-style).
@@ -177,6 +194,7 @@ class Console:
         def _(event):
             self.terminal_buffer.set_document(Document(''), True)
             self.logger_buffer.set_document(Document(''), True)
+            self._log_lines = []
             self._line_offset[self.terminal_buffer] = 0
             self._line_offset[self.logger_buffer] = 0
 
@@ -205,6 +223,16 @@ class Console:
         # mirror it to the system clipboard with toast feedback.
         self._install_select_to_copy(terminal_window)
         self._install_select_to_copy(logger_window)
+
+        self.filter_field.accept_handler = self._filter_accept_handler
+
+        @bindings.add("escape", filter=Condition(lambda: self.state.filter_editing), eager=True)
+        def _(event):
+            self._clear_log_filter()
+            try:
+                self.app.layout.focus(self.input_field)
+            except Exception:
+                pass
         self._install_offset_line_numbers(terminal_window)
         self._install_offset_line_numbers(logger_window)
         # Right-click is separate from left-drag selection (must not pause,
@@ -252,7 +280,7 @@ class Console:
                     event = await self.events.get()
                     logger.debug(f'event: {str(event.type)} {event.data}')
                     if event.type == EventType.LOG:
-                        self._buffer_insert_text(self.logger_buffer, f'{event.data}\n')
+                        self._append_log_line(f'{event.data}\n')
                     elif event.type == EventType.OUT:
                         self._buffer_insert_text(self.terminal_buffer, f'{event.data}\n')
                     elif event.type == EventType.IN:
@@ -367,6 +395,137 @@ class Console:
             except Exception:
                 pass
         return False  # false to keep the text in the buffer
+
+    _LEVEL_RANK = {
+        'dbg': 0, 'd': 0, 'D': 0,
+        'inf': 1, 'i': 1, 'I': 1,
+        'wrn': 2, 'w': 2, 'W': 2,
+        'err': 3, 'e': 3, 'E': 3,
+    }
+    _LEVEL_LINE_RE = re.compile(
+        r'(?:<(\w+)>)|(?:#.*?\d(?:\.\d+)? <(\w)>)')
+
+    def _open_log_filter(self):
+        self.state.filter_editing = True
+        self.filter_field.buffer.text = self.state.log_filter or ''
+        if self.app:
+            try:
+                self.app.layout.focus(self.filter_field)
+            except Exception:
+                pass
+            self.app.invalidate()
+
+    def _filter_accept_handler(self, buff):
+        expr = (buff.text or '').strip()
+        self._apply_log_filter(expr)
+        self.state.filter_editing = bool(expr)
+        if self.app:
+            try:
+                self.app.layout.focus(self.input_field)
+            except Exception:
+                pass
+        return False
+
+    def _clear_log_filter(self):
+        self.state.log_filter = ''
+        self.state.filter_editing = False
+        self._log_filter_re = None
+        self._log_filter_min_level = None
+        self.filter_field.buffer.text = ''
+        self._rebuild_log_view()
+        if self.app:
+            self.app.invalidate()
+
+    def _apply_log_filter(self, expr: str):
+        self.state.log_filter = expr
+        self._log_filter_re = None
+        self._log_filter_min_level = None
+        if not expr:
+            self._rebuild_log_view()
+            return
+        low = expr.lower()
+        if low.startswith('level:'):
+            name = low.split(':', 1)[1].strip()
+            if name in self._LEVEL_RANK:
+                self._log_filter_min_level = self._LEVEL_RANK[name]
+            else:
+                self.state.show_message(
+                    f'Unknown level {name!r} (dbg/inf/wrn/err)')
+                return
+        elif low.startswith('re:'):
+            pat = expr[3:]
+            try:
+                self._log_filter_re = re.compile(pat)
+            except re.error as e:
+                self.state.show_message(f'Bad regex: {e}')
+                return
+        else:
+            self._log_filter_re = re.compile(re.escape(expr), re.IGNORECASE)
+        self._rebuild_log_view()
+
+    def _log_line_level_rank(self, line: str):
+        m = self._LEVEL_LINE_RE.search(line)
+        if not m:
+            return None
+        token = m.group(1) or m.group(2)
+        return self._LEVEL_RANK.get(token)
+
+    def _log_line_visible(self, line: str) -> bool:
+        if not self.state.log_filter:
+            return True
+        if self._log_filter_min_level is not None:
+            rank = self._log_line_level_rank(line)
+            if rank is None:
+                return False
+            return rank >= self._log_filter_min_level
+        if self._log_filter_re is not None:
+            return self._log_filter_re.search(line) is not None
+        return True
+
+    def _trim_log_line_list(self):
+        max_lines = self.max_lines
+        if max_lines <= 0:
+            return 0
+        n = len(self._log_lines)
+        limit = int(max_lines * (1 + TRIM_HYSTERESIS))
+        if n <= limit:
+            return 0
+        drop = n - max_lines
+        del self._log_lines[:drop]
+        self._line_offset[self.logger_buffer] = (
+            self._line_offset.get(self.logger_buffer, 0) + drop)
+        return drop
+
+    def _rebuild_log_view(self):
+        """Rebuild logger_buffer from capped raw lines + active filter."""
+        visible = [ln for ln in self._log_lines if self._log_line_visible(ln)]
+        text = ''.join(visible)
+        buf = self.logger_buffer
+        if self._selection_span is not None and self._selection_span[0] is buf:
+            self._selection_span = None
+        buf.set_document(Document(text), bypass_readonly=True)
+        if self.state.scroll_to_end:
+            buf.cursor_position = len(text)
+        elif buf.cursor_position > len(text):
+            buf.cursor_position = len(text)
+
+    def _append_log_line(self, line: str):
+        """Append to the raw Log store and to the visible view when it matches."""
+        self._log_lines.append(line)
+        dropped = self._trim_log_line_list()
+        if dropped:
+            self._rebuild_log_view()
+            if not self.state.scroll_to_end:
+                self.state.paused_appended += 1
+                if self.app is not None:
+                    self.app.invalidate()
+            return
+        if self._log_line_visible(line):
+            self._buffer_insert_text(self.logger_buffer, line)
+        elif not self.state.scroll_to_end:
+            self.state.paused_appended += 1
+            if self.app is not None:
+                self.app.invalidate()
 
     def _install_offset_line_numbers(self, text_area):
         """Replace the default NumberedMargin with absolute (post-trim) numbers."""
@@ -514,8 +673,9 @@ class Console:
                 self.state.paused_appended += 1
                 if self.app is not None:
                     self.app.invalidate()
-            # Cap scrollback (may re-enter _text_changed + restore selection).
-            self._trim_oldest_lines(buffer)
+            # Log scrollback is capped via _log_lines / _trim_log_line_list.
+            if buffer is not self.logger_buffer:
+                self._trim_oldest_lines(buffer)
 
     def _apply_span(self, buffer, span):
         start, end = span
@@ -1208,12 +1368,22 @@ class Console:
             buffer.exit_selection()
 
     def _clear_pane_selection_on_escape(self):
-        """Esc: drop highlight; resume only an automatic selection pause."""
+        """Esc: drop highlight; resume only an automatic selection pause.
+
+        Returns True when there was a selection (or auto-pause) to clear.
+        """
+        had = any((
+            self._selection_span is not None,
+            self.terminal_buffer.selection_state is not None,
+            self.logger_buffer.selection_state is not None,
+            self._pause_origin == 'auto',
+        ))
         self._selection_span = None
         for buf in (self.terminal_buffer, self.logger_buffer):
             buf.exit_selection()
         if self._pause_origin == 'auto':
             self._resume_streaming_after_copy()
+        return had
 
     def _copy_pane_with_optional_resume(self, buffer):
         """Copy one pane; resume when the pause was automatic and text was selected.

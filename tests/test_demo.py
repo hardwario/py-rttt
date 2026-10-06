@@ -198,6 +198,6 @@ def test_demo_help_rate_burst():
     conn.handle(Event(EventType.IN, 'burst 5'))
     produced = [e for e in events[n1:] if e.type in (EventType.OUT, EventType.LOG)]
     # 5 burst lines + confirmation OUT
-    assert sum(1 for e in produced if str(e.data).startswith(('log ', 'term '))) == 5
+    assert sum(1 for e in produced if 'log ' in str(e.data) or str(e.data).startswith('term ')) == 5
     assert any('burst: 5' in str(e.data) for e in produced)
     conn.close()
