@@ -271,7 +271,7 @@ class Console:
                 'border': '#888888',
                 'message': 'bg:#bbee88 #222222',
                 'statusbar': 'noreverse bg:gray #000000',
-                # Visible pause: reverse yellow stands out on the gray bar.
+                # Visible pause badge on the Log pane bottom edge.
                 'paused': 'reverse bold bg:ansiyellow #000000',
                 'yellow': 'bg:ansiyellow #000000 bold',
                 'progress-bar.used': 'bg:#4488cc',

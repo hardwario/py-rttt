@@ -124,6 +124,10 @@ class RtttPty:
     def status(self) -> str:
         return self.rows_text()[self.rows - 1]
 
+    def paused_visible(self) -> bool:
+        """True when the Log-pane PAUSED badge is on screen."""
+        return any('PAUSED' in row for row in self.rows_text())
+
     def find_in_pane(self, needle: str, pane: str) -> tuple[int, int] | None:
         """Return 0-based (row, col) of needle in the Log or Terminal pane."""
         for r, line in enumerate(self.rows_text()):
@@ -245,7 +249,7 @@ def test_first_drag_in_log_copies_from_press_to_release(pty_app):
     assert 'log 8' in text, text
     assert 'term' not in text, text
     assert 'resumed' in app.status()
-    assert 'PAUSED' not in app.status()
+    assert not app.paused_visible()
 
 
 def test_first_drag_in_terminal_after_log_copies(pty_app):
@@ -271,7 +275,7 @@ def test_first_drag_in_terminal_after_log_copies(pty_app):
 def test_second_drag_does_not_use_previous_endpoint(pty_app):
     app = pty_app
     app.press_f5()  # freeze view for stable coordinates
-    assert 'PAUSED' in app.status()
+    assert app.paused_visible()
     logs = app.list_pane_lines('log', 'log')
     assert len(logs) >= 4, logs
     n = len(app.osc_copies)
@@ -297,7 +301,7 @@ def test_second_drag_does_not_use_previous_endpoint(pty_app):
 def test_auto_pause_copy_resumes_scrolling(pty_app):
     app = pty_app
     # Ensure streaming is on.
-    if 'PAUSED' in app.status():
+    if app.paused_visible():
         app.press_f5()
     logs = app.list_pane_lines('log', 'log')
     assert len(logs) >= 3
@@ -307,13 +311,13 @@ def test_auto_pause_copy_resumes_scrolling(pty_app):
     assert app.osc_copies[n:]
     st = app.status()
     assert 'resumed' in st, st
-    assert 'PAUSED' not in st, st
+    assert 'PAUSED' not in ''.join(app.rows_text()), st
 
 
 def test_manual_f5_drag_stays_paused(pty_app):
     app = pty_app
     app.press_f5()
-    assert 'PAUSED' in app.status()
+    assert app.paused_visible()
     logs = app.list_pane_lines('log', 'log')
     assert len(logs) >= 3
     n = len(app.osc_copies)
@@ -321,19 +325,19 @@ def test_manual_f5_drag_stays_paused(pty_app):
     app.drag(a[0], a[1], b[0], b[1] + len(b[2]) - 1)
     assert app.osc_copies[n:], 'expected a copy while manually paused'
     st = app.status()
-    assert 'PAUSED' in st, st
+    assert 'PAUSED' in ''.join(app.rows_text()), st
     assert 'resumed' not in st, st
 
 
 def test_plain_click_does_not_copy_or_pause(pty_app):
     app = pty_app
-    if 'PAUSED' in app.status():
+    if app.paused_visible():
         app.press_f5()
     pos = app.find_in_pane('log 4', 'log') or app.list_pane_lines('log', 'log')[0][:2]
     n = len(app.osc_copies)
     app.plain_click(pos[0], pos[1])
     assert len(app.osc_copies) == n
-    assert 'PAUSED' not in app.status()
+    assert not app.paused_visible()
 
 
 def test_burst_drag_still_copies_exact_span(pty_app):
@@ -358,7 +362,7 @@ def test_right_click_copies_after_left_drag(pty_app):
     """Left-drag select (manual pause) then RMB copies again via SGR button 2."""
     app = pty_app
     app.press_f5()
-    assert 'PAUSED' in app.status()
+    assert app.paused_visible()
     logs = app.list_pane_lines('log', 'log')
     assert len(logs) >= 3
     a, b = logs[0], logs[2]
@@ -372,19 +376,19 @@ def test_right_click_copies_after_left_drag(pty_app):
     # Either a fresh OSC 52 write, or at least a Copied toast (re-toast path).
     st = app.status()
     assert 'Copied' in st or app.osc_copies[n:], (st, app.osc_copies[n:])
-    assert 'PAUSED' in st, 'right-click must not resume'
+    assert app.paused_visible(), 'right-click must not resume'
     if app.osc_copies[n:]:
         assert a[2] in app.osc_copies[n] or first == app.osc_copies[n]
 
 
 def test_right_click_without_selection_does_not_pause(pty_app):
     app = pty_app
-    if 'PAUSED' in app.status():
+    if app.paused_visible():
         app.press_f5()
     pos = app.find_in_pane('log 4', 'log') or app.list_pane_lines('log', 'log')[0][:2]
     n = len(app.osc_copies)
     app.right_click(pos[0], pos[1])
-    assert 'PAUSED' not in app.status()
+    assert not app.paused_visible()
     # May re-toast a prior copy from an earlier test fixture state — just no pause.
     _ = n  # keep prior count unused; toast path is fine
 
@@ -393,7 +397,7 @@ def test_shift_up_extends_selection_then_ctrl_c_copies(pty_app):
     """Shift-Up (CSI 1;2A) grows a keyboard selection; Ctrl-C copies it."""
     app = pty_app
     app.press_f5()  # stable coords + manual pause
-    assert 'PAUSED' in app.status()
+    assert app.paused_visible()
     logs = app.list_pane_lines('log', 'log')
     assert len(logs) >= 3, logs
     # Click near the bottom of the visible log so Shift-Up has room to grow.
@@ -404,14 +408,14 @@ def test_shift_up_extends_selection_then_ctrl_c_copies(pty_app):
     app.press_ctrl_c()
     assert app.osc_copies[n:], 'Shift-Up + Ctrl-C copied nothing'
     # Manual F5 pause must survive keyboard copy.
-    assert 'PAUSED' in app.status()
+    assert app.paused_visible()
     assert 'resumed' not in app.status()
 
 def test_gutter_press_drag_copies_from_press_line(pty_app):
     """Press on the line-number gutter then drag — copy starts on that line."""
     app = pty_app
     app.press_f5()
-    assert 'PAUSED' in app.status()
+    assert app.paused_visible()
     logs = app.list_pane_lines('log', 'log')
     assert len(logs) >= 4, logs
     a, b = logs[0], logs[2]
@@ -432,7 +436,7 @@ def test_drag_past_pane_edge_extends_selection(pty_app):
     """Drag from mid-pane down past the pane — selection still grows/copies."""
     app = pty_app
     app.press_f5()
-    assert 'PAUSED' in app.status()
+    assert app.paused_visible()
     logs = app.list_pane_lines('log', 'log')
     assert len(logs) >= 3, logs
     a = logs[0]
