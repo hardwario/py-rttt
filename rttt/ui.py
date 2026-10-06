@@ -29,6 +29,10 @@ class State:
         # transport source -> {'status': ..., 'error': ...}, from CONN events
         self.conn = {}
         self.auto_reconnect = False
+        # Mouse reporting is on: in-app select-to-copy works. F6 turns it off to
+        # hand click-and-drag back to the terminal emulator (cross-pane / no
+        # clipboard). Overlays still force mouse on for clickable buttons.
+        self.mouse_enabled = True
         # Set by Console so the dialog can reach the connector that owns the
         # transport; no-ops when the connector does not support reconnecting.
         self.on_reconnect = None
@@ -68,6 +72,10 @@ class State:
 
     def is_show_status_bar(self):
         return self.show_status_bar
+
+    def toggle_mouse(self):
+        self.mouse_enabled = not self.mouse_enabled
+        return self.mouse_enabled
 
     # How a transport is named to the user; anything else falls back to its id.
     CONN_LABELS = {'rtt': 'Device'}
@@ -245,10 +253,13 @@ def create_status_bar(state):
         # Keep hints short so Copy / Shift-drag stay visible around 80–100 cols.
         f5_style = 'class:yellow' if paused else 'class:title'
         f5_label = ' F5 Resume ' if paused else ' F5 Pause '
+        f6_style = 'class:title' if state.mouse_enabled else 'class:yellow'
+        f6_label = ' F6 Mouse ' if state.mouse_enabled else ' F6 Mouse OFF '
         items.extend([
             ('class:title', ' F3 Focus '),
             ('class:title', ' F4 Reconn '),
             (f5_style, f5_label),
+            (f6_style, f6_label),
             ('class:title', ' F8 Clear '),
             ('class:title', ' Ctrl-Q Quit '),
             ('class:title', ' Ctrl-C Copy '),
