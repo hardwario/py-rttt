@@ -162,12 +162,14 @@ class Console:
                 # Resuming auto-scroll should drop any highlight; otherwise
                 # jumping the cursor to the end would stretch the selection.
                 self._pause_origin = None
+                self.state.paused_appended = 0
                 self._selection_span = None
                 for buf in (self.terminal_buffer, self.logger_buffer):
                     buf.exit_selection()
                     buf.cursor_position = len(buf.text)
             else:
                 self._pause_origin = 'manual'
+                self.state.paused_appended = 0
 
         @bindings.add("f8", eager=True)
         def _(event):
@@ -504,6 +506,11 @@ class Console:
                 pass  # between DOWN and first MOVE — no selection yet
             elif self.state.scroll_to_end:
                 buffer.cursor_position = len(buffer.text)
+            if not self.state.scroll_to_end:
+                # Combined Terminal+Log count for the PAUSED +N badge.
+                self.state.paused_appended += 1
+                if self.app is not None:
+                    self.app.invalidate()
             # Cap scrollback (may re-enter _text_changed + restore selection).
             self._trim_oldest_lines(buffer)
 
@@ -598,6 +605,7 @@ class Console:
             return False
         self.state.scroll_to_end = False
         self._pause_origin = 'auto'
+        self.state.paused_appended = 0
         if toast:
             self.state.show_message('Paused for selection (F5 resumes)', seconds=1.5)
         return True
@@ -611,6 +619,7 @@ class Console:
             return
         self.state.scroll_to_end = True
         self._pause_origin = None
+        self.state.paused_appended = 0
         self._selection_span = None
         for buf in (self.terminal_buffer, self.logger_buffer):
             buf.exit_selection()

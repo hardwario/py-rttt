@@ -44,6 +44,8 @@ class State:
         # Ephemeral status toast (copy feedback, etc.); cleared by expiry or task.
         self.message = ''
         self.message_expires = 0.0
+        # Lines appended to either pane while paused (combined); for badge.
+        self.paused_appended = 0
 
     def show_message(self, text, seconds=2.0):
         """Show an ephemeral toast on the right of the status bar (replaces clock)."""
@@ -293,8 +295,11 @@ def create_status_bar(state):
         items = [('class:title', ' RTTT ')]
         if paused:
             # Distinct reverse/yellow segment — visible on every pause path
-            # (F5, auto-pause on drag move, stays until resume).
-            items.append(('class:paused', ' PAUSED '))
+            # (F5, auto-pause on drag move, stays until resume). Combined
+            # count of Terminal+Log lines appended since pause (not per-pane).
+            n = state.paused_appended
+            label = f' PAUSED +{n} ' if n else ' PAUSED '
+            items.append(('class:paused', label))
 
         # Keep hints short so Copy / Shift-drag stay visible around 80–100 cols.
         # Hints stay up while a toast is showing on the right (replacing clock).
