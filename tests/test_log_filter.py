@@ -71,3 +71,51 @@ def test_status_shows_filter():
     text = left.content.text()
     joined = ''.join(t for _, t in text)
     assert 'FILTER: level:wrn' in joined
+
+
+def test_filter_gutter_keeps_absolute_line_numbers():
+    console = Console(DemoConnector(delay=10), history_file=None)
+    _fill_levels(console)
+    # Absolute numbers 1..6 for the six seeded lines.
+    assert console._log_view_abs_line_nos == [1, 2, 3, 4, 5, 6]
+    console._apply_log_filter('level:wrn')
+    # W at raw index 2 (abs 3), E at 3 (abs 4), W at 5 (abs 6).
+    assert console._log_view_abs_line_nos == [3, 4, 6]
+    # Margin callback matches.
+    margin = console.logger_window.window.left_margins[0]
+    assert margin.get_line_number(0) == 3
+    assert margin.get_line_number(1) == 4
+    assert margin.get_line_number(2) == 6
+
+
+def test_filter_open_refocuses_input():
+    """F7 must land focus on the filter so the first typed char is kept."""
+    import asyncio
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    async def _run():
+        console = Console(DemoConnector(delay=10), history_file=None)
+        with create_pipe_input() as inp:
+            app = console.app
+            app.output = DummyOutput()
+            app.input = inp
+
+            async def interact():
+                await asyncio.sleep(0)
+                console._open_log_filter()
+                # Allow the refocus background task a few turns.
+                for _ in range(8):
+                    await asyncio.sleep(0)
+                    if console.has_focus(console.filter_field):
+                        break
+                assert console.has_focus(console.filter_field)
+                inp.send_text('wrn')
+                await asyncio.sleep(0.05)
+                assert console.filter_field.buffer.text == 'wrn'
+                app.exit()
+
+            app.create_background_task(interact())
+            await app.run_async()
+
+    asyncio.run(_run())
