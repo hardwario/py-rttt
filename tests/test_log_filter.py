@@ -119,3 +119,98 @@ def test_filter_open_refocuses_input():
             await app.run_async()
 
     asyncio.run(_run())
+
+
+def test_filtered_paused_append_keeps_absolute_top_without_trim():
+    """Filter + F5: rebuild-on-append must not drift the pinned absolute top."""
+    console = Console(DemoConnector(delay=10), history_file=None, max_lines=0)
+    for i in range(80):
+        lvl = ['I', 'W', 'E', 'D'][i % 4]
+        console._append_log_line(f'# {i}.0 <{lvl}> line {i}\n')
+    console._apply_log_filter('level:wrn')
+    buf = console.logger_buffer
+    window = console.logger_window.window
+    window.vertical_scroll = 5
+    buf.cursor_position = buf.document.translate_row_col_to_index(5, 0)
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    console.state.paused_appended = 0
+    console._pin_viewports()
+    top_before = console._log_view_abs_line_nos[window.vertical_scroll]
+    pin = console._pinned_abs_top[buf]
+    content_before = buf.text.splitlines()[window.vertical_scroll]
+    # Simulate Document defaulting to EOF before restore (pre-fix symptom).
+    buf.cursor_position = len(buf.text)
+    for i in range(80, 300):
+        lvl = ['I', 'W', 'E', 'D'][i % 4]
+        console._append_log_line(f'# {i}.0 <{lvl}> line {i}\n')
+    assert console._line_offset.get(buf, 0) == 0
+    assert window.vertical_scroll >= 0
+    top_after = console._log_view_abs_line_nos[window.vertical_scroll]
+    assert top_after == top_before, (top_before, top_after)
+    assert console._pinned_abs_top[buf] == pin
+    assert buf.text.splitlines()[window.vertical_scroll] == content_before
+    # Cursor must stay off EOF so Window cannot chase the stream.
+    assert buf.cursor_position < len(buf.text)
+
+
+def test_filtered_view_gutter_skips_phantom_trailing_line():
+    """Trailing newline makes Document.line_count = N+1; gutter must not number it."""
+    console = Console(DemoConnector(delay=10), history_file=None)
+    _fill_levels(console)
+    console._apply_log_filter('level:wrn')
+    nos = console._log_view_abs_line_nos
+    assert nos == [3, 4, 6]
+    buf = console.logger_buffer
+    # Join of newline-terminated lines → phantom empty last Document row.
+    assert buf.text.endswith('\n')
+    assert buf.document.line_count == len(nos) + 1
+    margin = console.logger_window.window.left_margins[0]
+    assert margin.get_line_number(0) == 3
+    assert margin.get_line_number(1) == 4
+    assert margin.get_line_number(2) == 6
+    assert margin.get_line_number(len(nos)) is None
+    assert margin.get_line_number(len(nos) + 5) is None
+
+
+def test_f7_key_focuses_filter_on_first_press():
+    """F7 binding (not only _open_log_filter) must focus filter immediately."""
+    import asyncio
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    async def _run():
+        console = Console(DemoConnector(delay=10), history_file=None)
+        with create_pipe_input() as inp:
+            app = console.app
+            app.output = DummyOutput()
+            app.input = inp
+
+            async def interact():
+                try:
+                    await asyncio.sleep(0)
+                    # Focus Log first (the GUI race: F7 while Log focused).
+                    app.layout.focus(console.logger_window)
+                    await asyncio.sleep(0)
+                    inp.send_text('\x1b[18~')  # F7
+                    focused = False
+                    for _ in range(20):
+                        await asyncio.sleep(0.01)
+                        if console.state.filter_editing and console.has_focus(
+                                console.filter_field):
+                            focused = True
+                            break
+                    assert focused, (
+                        console.state.filter_editing,
+                        app.layout.current_control,
+                    )
+                    inp.send_text('wrn')
+                    await asyncio.sleep(0.05)
+                    assert console.filter_field.buffer.text == 'wrn'
+                finally:
+                    app.exit()
+
+            app.create_background_task(interact())
+            await app.run_async()
+
+    asyncio.run(_run())
