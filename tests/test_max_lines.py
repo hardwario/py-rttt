@@ -113,3 +113,52 @@ def test_max_lines_zero_disables_trim():
     for i in range(50):
         console._buffer_insert_text(buf, f'x {i}\n')
     assert buf.text.count('\n') == 50
+
+
+def test_paused_log_trim_rebuild_keeps_viewport():
+    """Log trim used to Document()-default the cursor to end and scroll."""
+    console = Console(DemoConnector(delay=10), history_file=None, max_lines=20)
+    buf = console.logger_buffer
+    window = console.logger_window.window
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    for i in range(18):
+        console._append_log_line(f'# {i}.0 <I> line {i}\n')
+    window.vertical_scroll = 5
+    console._pinned_scroll[buf] = 5
+    # Simulate the pre-fix state: cursor left at end after streaming.
+    buf.cursor_position = len(buf.text)
+    console._clamp_cursor_to_pinned(buf)
+    top_abs_before = console._log_view_abs_line_nos[5]
+    # One trim cycle: cross limit 22 (20 * 1.1) → rebuild while paused.
+    for i in range(18, 23):
+        console._append_log_line(f'# {i}.0 <I> line {i}\n')
+    assert len(console._log_lines) == 20
+    pin = console._pinned_scroll[buf]
+    # Same absolute line stays at the top (not yanked to the newest lines).
+    assert console._log_view_abs_line_nos[pin] == top_abs_before
+    assert window.vertical_scroll == pin
+    # Cursor must not sit at EOF (that would pull scroll to the bottom).
+    assert buf.cursor_position < len(buf.text)
+    newest = f'line {22}'
+    assert newest in buf.text
+    # Top-of-view content is still the anchored older line, not the newest.
+    first_line = buf.text.splitlines()[pin]
+    assert f'line {top_abs_before - 1}' in first_line
+
+
+def test_paused_terminal_append_keeps_pinned_scroll():
+    console = Console(DemoConnector(delay=10), history_file=None, max_lines=0)
+    buf = console.terminal_buffer
+    window = console.terminal_window.window
+    for i in range(40):
+        console._buffer_insert_text(buf, f'T{i}\n')
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    window.vertical_scroll = 10
+    console._pin_viewports()
+    assert console._pinned_scroll[buf] == 10
+    for i in range(40, 55):
+        console._buffer_insert_text(buf, f'T{i}\n')
+    assert window.vertical_scroll == 10
+    assert console._pinned_scroll[buf] == 10

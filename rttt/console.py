@@ -59,6 +59,15 @@ class Console:
         self._selection_span = None  # tuple[Buffer, int, int] | None
         # True after mouse-up / copy inclusive bump so we do not double-bump.
         self._selection_inclusive = False
+        # While paused: pinned vertical_scroll per buffer so Window's
+        # keep-cursor-visible logic cannot walk the viewport as lines append.
+        self._pinned_scroll = {}  # Buffer -> int
+        # Absolute line numbers parallel to the visible Log view (filter).
+        self._log_view_abs_line_nos = []
+        # Timer-driven edge autoscroll while dragging outside a pane.
+        self._edge_scroll_task = None
+        self._edge_scroll_dir = 0  # -1 up, 0 idle, +1 down
+        self._edge_scroll_dist = 0  # rows beyond the pane edge
 
         if history_file:
             d = os.path.dirname(history_file)
@@ -183,20 +192,24 @@ class Console:
                 self._pause_origin = None
                 self.state.paused_appended = 0
                 self._selection_span = None
+                self._clear_pinned_scroll()
                 for buf in (self.terminal_buffer, self.logger_buffer):
                     buf.exit_selection()
                     buf.cursor_position = len(buf.text)
             else:
                 self._pause_origin = 'manual'
                 self.state.paused_appended = 0
+                self._pin_viewports()
 
         @bindings.add("f8", eager=True)
         def _(event):
             self.terminal_buffer.set_document(Document(''), True)
             self.logger_buffer.set_document(Document(''), True)
             self._log_lines = []
+            self._log_view_abs_line_nos = []
             self._line_offset[self.terminal_buffer] = 0
             self._line_offset[self.logger_buffer] = 0
+            self._clear_pinned_scroll()
 
         @bindings.add("f3", eager=True)
         def _(event):
@@ -406,14 +419,45 @@ class Console:
         r'(?:<(\w+)>)|(?:#.*?\d(?:\.\d+)? <(\w)>)')
 
     def _open_log_filter(self):
+        """Show the Log filter row and focus it.
+
+        The filter sits in a ConditionalContainer that was zero-height until
+        ``filter_editing`` flips. Focusing in the same key-handler turn can
+        lose to the next redraw (Log is read_only → the first typed character
+        is dropped). Re-assert focus after a yield so the first key lands.
+        """
         self.state.filter_editing = True
-        self.filter_field.buffer.text = self.state.log_filter or ''
-        if self.app:
+        fb = self.filter_field.buffer
+        fb.text = self.state.log_filter or ''
+        fb.cursor_position = len(fb.text)
+        if not self.app:
+            return
+        app = self.app
+
+        def _focus_filter():
             try:
-                self.app.layout.focus(self.filter_field)
+                app.layout.focus(self.filter_field)
             except Exception:
                 pass
-            self.app.invalidate()
+
+        _focus_filter()
+        app.invalidate()
+
+        if not getattr(app, 'is_running', False):
+            return
+
+        async def _refocus():
+            # A couple of event-loop turns cover the ConditionalContainer
+            # becoming focusable after layout.
+            for _ in range(5):
+                await asyncio.sleep(0)
+                if not self.state.filter_editing:
+                    return
+                _focus_filter()
+                if self.has_focus(self.filter_field):
+                    return
+
+        app.create_background_task(_refocus())
 
     def _filter_accept_handler(self, buff):
         expr = (buff.text or '').strip()
@@ -497,17 +541,65 @@ class Console:
         return drop
 
     def _rebuild_log_view(self):
-        """Rebuild logger_buffer from capped raw lines + active filter."""
-        visible = [ln for ln in self._log_lines if self._log_line_visible(ln)]
-        text = ''.join(visible)
+        """Rebuild logger_buffer from capped raw lines + active filter.
+
+        Preserves the paused viewport (same absolute lines) so a trim cannot
+        yank the Log pane to the end via Document()'s default end cursor.
+        Also refreshes ``_log_view_abs_line_nos`` for the gutter.
+        """
         buf = self.logger_buffer
+        window = self._window_for_buffer(buf)
+        anchor_abs = None
+        if not self.state.scroll_to_end and window is not None:
+            pin = self._pinned_scroll.get(buf, window.vertical_scroll)
+            nos = self._log_view_abs_line_nos
+            if nos:
+                idx = max(0, min(int(pin), len(nos) - 1))
+                anchor_abs = nos[idx]
+            else:
+                base = self._line_offset.get(buf, 0)
+                anchor_abs = base + max(0, int(pin)) + 1
+
+        visible = []
+        abs_nos = []
+        base = self._line_offset.get(buf, 0)
+        for i, ln in enumerate(self._log_lines):
+            if self._log_line_visible(ln):
+                visible.append(ln)
+                abs_nos.append(base + i + 1)
+        self._log_view_abs_line_nos = abs_nos
+        text = ''.join(visible)
+
         if self._selection_span is not None and self._selection_span[0] is buf:
             self._selection_span = None
-        buf.set_document(Document(text), bypass_readonly=True)
+
         if self.state.scroll_to_end:
-            buf.cursor_position = len(text)
-        elif buf.cursor_position > len(text):
-            buf.cursor_position = len(text)
+            cursor = len(text)
+            buf.set_document(
+                Document(text, cursor_position=cursor), bypass_readonly=True)
+            return
+
+        # Paused: place cursor on the anchored row so Window will not scroll.
+        new_scroll = 0
+        if anchor_abs is not None and abs_nos:
+            new_scroll = 0
+            for i, n in enumerate(abs_nos):
+                if n >= anchor_abs:
+                    new_scroll = i
+                    break
+            else:
+                new_scroll = max(0, len(abs_nos) - 1)
+        if text:
+            doc = Document(text)
+            row = min(new_scroll, max(0, doc.line_count - 1))
+            cursor = doc.translate_row_col_to_index(row, 0)
+        else:
+            cursor = 0
+        buf.set_document(
+            Document(text, cursor_position=cursor), bypass_readonly=True)
+        if window is not None:
+            window.vertical_scroll = new_scroll
+        self._pinned_scroll[buf] = new_scroll
 
     def _append_log_line(self, line: str):
         """Append to the raw Log store and to the visible view when it matches."""
@@ -521,6 +613,8 @@ class Console:
                     self.app.invalidate()
             return
         if self._log_line_visible(line):
+            offset = self._line_offset.get(self.logger_buffer, 0)
+            self._log_view_abs_line_nos.append(offset + len(self._log_lines))
             self._buffer_insert_text(self.logger_buffer, line)
         elif not self.state.scroll_to_end:
             self.state.paused_appended += 1
@@ -536,7 +630,17 @@ class Console:
         def get_offset(b=buf):
             return self._line_offset.get(b, 0)
 
-        window.left_margins = [OffsetNumberedMargin(get_offset)]
+        line_number_fn = None
+        if buf is self.logger_buffer:
+            def _log_line_number(lineno, b=buf):
+                nos = self._log_view_abs_line_nos
+                if nos and 0 <= lineno < len(nos):
+                    return nos[lineno]
+                return lineno + 1 + self._line_offset.get(b, 0)
+            line_number_fn = _log_line_number
+
+        window.left_margins = [
+            OffsetNumberedMargin(get_offset, get_line_number=line_number_fn)]
 
     def _window_for_buffer(self, buffer):
         if buffer is self.logger_buffer:
@@ -544,6 +648,62 @@ class Console:
         if buffer is self.terminal_buffer:
             return self.terminal_window.window
         return None
+
+    def _pin_viewports(self):
+        """Freeze both panes' vertical_scroll + clamp cursors into view.
+
+        prompt_toolkit Window always scrolls to keep the cursor visible. After
+        F5 the cursor is often still at the buffer end, so each append would
+        drag the viewport down unless we pin scroll and keep the cursor inside
+        the frozen rows.
+        """
+        for buf in (self.terminal_buffer, self.logger_buffer):
+            window = self._window_for_buffer(buf)
+            if window is None:
+                continue
+            self._pinned_scroll[buf] = max(0, int(window.vertical_scroll))
+            self._clamp_cursor_to_pinned(buf)
+
+    def _clear_pinned_scroll(self):
+        self._pinned_scroll.clear()
+
+    def _clamp_cursor_to_pinned(self, buffer):
+        """Move cursor onto a pinned visible row so Window will not scroll."""
+        window = self._window_for_buffer(buffer)
+        if window is None:
+            return
+        pin = self._pinned_scroll.get(buffer)
+        if pin is None:
+            return
+        line_count = buffer.document.line_count
+        if line_count <= 0:
+            window.vertical_scroll = 0
+            return
+        info = window.render_info
+        height = (info.window_height if info is not None else None) or 20
+        first = max(0, min(int(pin), line_count - 1))
+        last = max(first, min(first + height - 1, line_count - 1))
+        try:
+            row = buffer.document.cursor_position_row
+        except Exception:
+            row = first
+        if row < first or row > last:
+            buffer.cursor_position = buffer.document.translate_row_col_to_index(
+                first, 0)
+        window.vertical_scroll = first
+        self._pinned_scroll[buffer] = first
+
+    def _restore_pinned_scroll(self, buffer):
+        """Re-apply a pinned viewport after a streaming append while paused.
+
+        Only acts when ``_pin_viewports`` (F5 / auto-pause) has recorded a pin;
+        otherwise leave scroll alone so callers can adjust it (trim tests).
+        """
+        if self.state.scroll_to_end:
+            return
+        if buffer not in self._pinned_scroll:
+            return
+        self._clamp_cursor_to_pinned(buffer)
 
     def _trim_oldest_lines(self, buffer):
         """Drop oldest lines when the pane exceeds max_lines (+ hysteresis).
@@ -603,6 +763,9 @@ class Console:
         window = self._window_for_buffer(buffer)
         if window is not None and not self.state.scroll_to_end:
             window.vertical_scroll = max(0, window.vertical_scroll - drop)
+            if buffer in self._pinned_scroll:
+                self._pinned_scroll[buffer] = max(
+                    0, self._pinned_scroll[buffer] - drop)
 
         buffer._set_text(new_text)
         # Caller always follows with _text_changed + selection restore; we
@@ -671,6 +834,10 @@ class Console:
             if not self.state.scroll_to_end:
                 # Combined Terminal+Log count for the PAUSED +N badge.
                 self.state.paused_appended += 1
+                # Re-assert pinned scroll + cursor-in-view so prompt_toolkit
+                # cannot walk the viewport to chase a cursor near the end.
+                if not dragging:
+                    self._restore_pinned_scroll(buffer)
                 if self.app is not None:
                     self.app.invalidate()
             # Log scrollback is capped via _log_lines / _trim_log_line_list.
@@ -769,6 +936,7 @@ class Console:
         self.state.scroll_to_end = False
         self._pause_origin = 'auto'
         self.state.paused_appended = 0
+        self._pin_viewports()
         if toast:
             self.state.show_message('Paused for selection (F5 resumes)', seconds=1.5)
         return True
@@ -784,6 +952,7 @@ class Console:
         self._pause_origin = None
         self.state.paused_appended = 0
         self._selection_span = None
+        self._clear_pinned_scroll()
         for buf in (self.terminal_buffer, self.logger_buffer):
             buf.exit_selection()
             buf.cursor_position = len(buf.text)
@@ -993,49 +1162,101 @@ class Console:
 
         # Wheel always scrolls the drag pane and keeps the selection anchor.
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self._stop_edge_scroll()
             return self._drag_scroll_and_extend(buf, direction=-1)
         if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self._stop_edge_scroll()
             return self._drag_scroll_and_extend(buf, direction=1)
 
-        # Outside the pane: scroll + extend only (do not invent extreme
-        # BufferControl coords — those crash the lexer/line lookup).
-        if y < top:
-            self._drag_scroll_and_extend(buf, direction=-1)
-            if mouse_event.event_type == MouseEventType.MOUSE_UP:
-                self._finish_drag_on_mouse_up(buf)
-            return None
-        if y > bottom:
-            self._drag_scroll_and_extend(buf, direction=1)
-            if mouse_event.event_type == MouseEventType.MOUSE_UP:
-                self._finish_drag_on_mouse_up(buf)
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            self._stop_edge_scroll()
+            # One last extend toward the edge we were held past, then finish.
+            if y < top:
+                self._drag_scroll_and_extend(buf, direction=-1)
+            elif y > bottom:
+                self._drag_scroll_and_extend(buf, direction=1)
+            self._finish_drag_on_mouse_up(buf)
             return None
 
-        # Fallback: event landed in capture but coords look inside — treat as
-        # edge scroll toward the nearer vertical edge, then finish on UP.
+        # Outside the pane: start/refresh timer-driven autoscroll. A single
+        # MOVE only advances one line; holding still must keep scrolling.
+        if y < top:
+            self._start_edge_scroll(direction=-1, distance=top - y)
+            return None
+        if y > bottom:
+            self._start_edge_scroll(direction=1, distance=y - bottom)
+            return None
+
+        # Pointer returned inside the capture fringe's idea of "inside" —
+        # stop the timer; in-pane MOVE is handled by BufferControl.
+        self._stop_edge_scroll()
         mid = (top + bottom) / 2
         self._drag_scroll_and_extend(
             buf, direction=-1 if y < mid else 1)
-        if mouse_event.event_type == MouseEventType.MOUSE_UP:
-            self._finish_drag_on_mouse_up(buf)
         return None
 
-    def _drag_scroll_and_extend(self, buffer, direction):
-        """Scroll one line and move the selection cursor to the new edge."""
+    def _start_edge_scroll(self, direction, distance=1):
+        """Run autoscroll while the drag pointer stays outside the pane."""
+        self._edge_scroll_dir = -1 if direction < 0 else 1
+        self._edge_scroll_dist = max(1, int(distance))
+        if self._edge_scroll_task is not None:
+            return
+        if self.app is None or not getattr(self.app, 'is_running', False):
+            # No event loop (unit tests): one immediate step.
+            buf = self._drag_buffer
+            if buf is not None:
+                self._drag_scroll_and_extend(buf, self._edge_scroll_dir)
+            return
+
+        async def _loop():
+            try:
+                while self._edge_scroll_dir and self._drag_buffer is not None:
+                    buf = self._drag_buffer
+                    # Speed grows with distance past the edge (1..8 lines/tick).
+                    lines = min(8, 1 + self._edge_scroll_dist // 2)
+                    for _ in range(lines):
+                        if not self._edge_scroll_dir or self._drag_buffer is None:
+                            break
+                        self._drag_scroll_and_extend(buf, self._edge_scroll_dir)
+                    if self.app is not None:
+                        self.app.invalidate()
+                    await asyncio.sleep(0.06)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._edge_scroll_task = None
+
+        self._edge_scroll_task = self.app.create_background_task(_loop())
+
+    def _stop_edge_scroll(self):
+        self._edge_scroll_dir = 0
+        self._edge_scroll_dist = 0
+        task = self._edge_scroll_task
+        self._edge_scroll_task = None
+        if task is not None:
+            task.cancel()
+
+    def _drag_scroll_and_extend(self, buffer, direction, steps=1):
+        """Scroll ``steps`` lines and move the selection cursor to the new edge."""
         window = self._window_for_buffer(buffer)
         if window is None:
             return NotImplemented
         info = window.render_info
         if info is None:
             return NotImplemented
+        steps = max(1, int(steps))
         # Adjust vertical_scroll directly — Window._scroll_* may also move the
         # cursor via content.move_cursor_up/down, which fights the selection.
-        if direction < 0:
-            if window.vertical_scroll > 0:
-                window.vertical_scroll -= 1
-        else:
-            max_scroll = max(0, info.content_height - info.window_height)
-            if window.vertical_scroll < max_scroll:
-                window.vertical_scroll += 1
+        for _ in range(steps):
+            if direction < 0:
+                if window.vertical_scroll > 0:
+                    window.vertical_scroll -= 1
+            else:
+                max_scroll = max(0, info.content_height - info.window_height)
+                if window.vertical_scroll < max_scroll:
+                    window.vertical_scroll += 1
+        if not self.state.scroll_to_end:
+            self._pinned_scroll[buffer] = max(0, int(window.vertical_scroll))
         line_count = buffer.document.line_count
         if line_count <= 0:
             return None
@@ -1071,6 +1292,7 @@ class Console:
 
     def _finish_drag_on_mouse_up(self, buf):
         """Complete a select-to-copy drag (shared by pane handler and capture)."""
+        self._stop_edge_scroll()
         self._drag_buffer = None
         auto_paused = self._paused_for_drag
         self._paused_for_drag = False
@@ -1157,6 +1379,11 @@ class Console:
 
             if mouse_event.event_type == MouseEventType.MOUSE_DOWN:
                 self._seed_drag(buf, control)
+
+            # Pointer is back inside this pane — stop timer-driven edge scroll.
+            if self._edge_scroll_dir and mouse_event.event_type in (
+                    MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP):
+                self._stop_edge_scroll()
 
             result = None
             try:
