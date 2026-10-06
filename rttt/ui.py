@@ -2,6 +2,9 @@ from prompt_toolkit.widgets import TextArea, SearchToolbar, Frame, HorizontalLin
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, WindowAlign, ConditionalContainer, FloatContainer, Float
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import LayoutDimension
+from prompt_toolkit.layout.margins import NumberedMargin
+from prompt_toolkit.formatted_text.base import StyleAndTextTuples
+from typing import Callable
 from prompt_toolkit.history import FileHistory
 from datetime import datetime
 import time
@@ -172,6 +175,53 @@ class State:
 
     def set_app(self, app):
         self.app = app
+
+
+class OffsetNumberedMargin(NumberedMargin):
+    """Line numbers that stay absolute after oldest-line trimming.
+
+    ``get_offset`` returns how many lines have been dropped from the start of
+    the buffer; displayed numbers are ``lineno + 1 + offset``.
+    """
+
+    def __init__(self, get_offset: Callable[[], int], **kwargs):
+        super().__init__(**kwargs)
+        self.get_offset = get_offset
+
+    def get_width(self, get_ui_content):
+        line_count = get_ui_content().line_count + max(0, self.get_offset())
+        return max(3, len(f"{line_count}") + 1)
+
+    def create_margin(self, window_render_info, width: int, height: int) -> StyleAndTextTuples:
+        offset = max(0, int(self.get_offset() or 0))
+        relative = self.relative()
+        style = "class:line-number"
+        style_current = "class:line-number.current"
+        current_lineno = window_render_info.ui_content.cursor_position.y
+        result: StyleAndTextTuples = []
+        last_lineno = None
+        y = 0
+        for y, lineno in enumerate(window_render_info.displayed_lines):
+            if lineno != last_lineno:
+                if lineno is not None:
+                    display = lineno + 1 + offset
+                    if lineno == current_lineno:
+                        if relative:
+                            result.append((style_current, "%i" % display))
+                        else:
+                            result.append(
+                                (style_current, ("%i " % display).rjust(width)))
+                    else:
+                        if relative:
+                            display = abs(lineno - current_lineno) - 1
+                        result.append((style, ("%i " % display).rjust(width)))
+            last_lineno = lineno
+            result.append(("", "\n"))
+        if self.display_tildes():
+            while y < window_render_info.window_height:
+                result.append(("class:tilde", "~\n"))
+                y += 1
+        return result
 
 
 def create_terminal_window():
