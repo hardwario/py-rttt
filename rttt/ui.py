@@ -307,6 +307,9 @@ def create_log_pause_badge(state):
     """PAUSED +N strip on the bottom edge of the Log pane (not the status bar).
 
     Combined Terminal+Log append count since pause. Hidden while scrolling.
+    Placed directly under the Log TextArea so the Filter row stays put when
+    the badge appears (putting it below Filter made Filter jump up one line
+    and look like the badge stole its row).
     """
     def get_text():
         n = state.paused_appended
@@ -424,11 +427,13 @@ def create_layout(state, history_file):
         focus_on_click=True,
     )
     pause_badge = create_log_pause_badge(state)
+    # Order matters: PAUSED sits on the Log's bottom edge; Filter stays below
+    # so enabling pause does not slide Filter up into the badge's slot.
     hs_logger = HSplit([
         logger_window,
+        pause_badge,
         logger_search,
         filter_field,
-        pause_badge,
     ])
 
     flash_bar = ProgressBar()
