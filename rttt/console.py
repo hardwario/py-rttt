@@ -6,6 +6,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.styles import Style, Priority
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
 from prompt_toolkit.document import Document
 from prompt_toolkit.clipboard.base import ClipboardData
@@ -56,8 +57,109 @@ class Console:
         def _(event):
             # One pane only: focused Terminal XOR Log. Command box re-toasts
             # the last single-pane copy without merging buffers.
-            buf = self._focused_copy_buffer()
-            self._copy_from_buffer(buf, clear_selection=bool(buf))
+            self._ctrl_c_copy()
+
+        @bindings.add("f6", eager=True)
+        def _(event):
+            self.state.toggle_mouse()
+            if self.app:
+                self.app.invalidate()
+
+        def _pane_focused():
+            return self.has_focus(terminal_window) or self.has_focus(logger_window)
+
+        pane_focused = Condition(_pane_focused)
+
+        def _extend_selection(move):
+            """Grow the selection in the focused read-only pane by one cursor move.
+
+            Auto-pauses scroll on the first extension while streaming (same
+            origin as a mouse drag) so lines do not jump under the highlight.
+            """
+            buffer = None
+            for window in (terminal_window, logger_window):
+                if self.has_focus(window):
+                    buffer = window.buffer
+                    break
+            if buffer is None:
+                return
+            offset = move(buffer)
+            if not offset:
+                return
+            if buffer.selection_state is None:
+                buffer.start_selection()
+                self._clear_other_pane_selection(buffer)
+            buffer.cursor_position += offset
+            ss = buffer.selection_state
+            if ss is not None:
+                lo, hi = sorted([ss.original_cursor_position, buffer.cursor_position])
+                if hi > lo:
+                    self._selection_span = (buffer, lo, hi)
+            if self.state.scroll_to_end:
+                self._pause_auto_scroll_for_selection(toast=True)
+
+        @bindings.add("s-left", filter=pane_focused, eager=True)
+        def _(event):
+            _extend_selection(lambda b: -1 if b.cursor_position else 0)
+
+        @bindings.add("s-right", filter=pane_focused, eager=True)
+        def _(event):
+            _extend_selection(lambda b: 1 if b.cursor_position < len(b.text) else 0)
+
+        @bindings.add("s-up", filter=pane_focused, eager=True)
+        def _(event):
+            _extend_selection(lambda b: b.document.get_cursor_up_position())
+
+        @bindings.add("s-down", filter=pane_focused, eager=True)
+        def _(event):
+            _extend_selection(lambda b: b.document.get_cursor_down_position())
+
+        @bindings.add("s-home", filter=pane_focused, eager=True)
+        def _(event):
+            _extend_selection(
+                lambda b: -len(b.document.current_line_before_cursor))
+
+        @bindings.add("s-end", filter=pane_focused, eager=True)
+        def _(event):
+            _extend_selection(
+                lambda b: len(b.document.current_line_after_cursor))
+
+        @bindings.add("c-a", filter=pane_focused, eager=True)
+        def _(event):
+            buffer = None
+            for window in (terminal_window, logger_window):
+                if self.has_focus(window):
+                    buffer = window.buffer
+                    break
+            if buffer is None:
+                return
+            buffer.cursor_position = 0
+            buffer.start_selection()
+            buffer.cursor_position = len(buffer.text)
+            self._clear_other_pane_selection(buffer)
+            if buffer.text:
+                self._selection_span = (buffer, 0, len(buffer.text))
+            if self.state.scroll_to_end:
+                self._pause_auto_scroll_for_selection(toast=True)
+
+        def _escape_clears_selection():
+            if self._pause_origin == 'auto':
+                return True
+            if self._selection_span is not None:
+                return True
+            for buf in (self.terminal_buffer, self.logger_buffer):
+                if buf.selection_state is not None:
+                    return True
+            return False
+
+        @bindings.add("escape", filter=Condition(_escape_clears_selection), eager=True)
+        def _(event):
+            # Drop the highlight; auto-pause from selection resumes (manual F5 stays).
+            self._selection_span = None
+            for buf in (self.terminal_buffer, self.logger_buffer):
+                buf.exit_selection()
+            if self._pause_origin == 'auto':
+                self._resume_streaming_after_copy()
 
         @bindings.add("f4", eager=True)
         def _(event):
@@ -114,11 +216,11 @@ class Console:
         self.app = Application(
             layout=Layout(root_container, focused_element=self.input_field),
             key_bindings=bindings,
-            # Mouse reporting stays on so in-app selection (and select-to-copy)
-            # works in every view, including the split layout. Hold Shift while
-            # dragging to fall through to the terminal's native selection when
-            # the emulator supports that bypass.
-            mouse_support=True,
+            # Mouse on by default (select-to-copy). F6 toggles it off so the
+            # terminal's own selection works across panes / without clipboard.
+            # Hold Shift while dragging for native selection when the emulator
+            # supports that bypass. Overlays force mouse on for buttons.
+            mouse_support=Condition(self._wants_mouse),
             full_screen=True,
             refresh_interval=1,
             enable_page_navigation_bindings=True,
@@ -207,6 +309,16 @@ class Console:
 
     def has_focus(self, window):
         return self.app.layout.has_focus(window)
+
+    def _wants_mouse(self):
+        """Whether to ask the terminal for mouse reporting.
+
+        On by default for in-app select-to-copy. F6 turns it off. An overlay
+        overrides the toggle so its buttons stay clickable.
+        """
+        if self.state.show_conn_overlay():
+            return True
+        return self.state.mouse_enabled
 
     def _leaf(self):
         """The connector at the end of the middleware chain, which owns the
@@ -571,6 +683,27 @@ class Console:
         n = len(text)
         self.state.show_message(f'Pasted {n} char{"s" if n != 1 else ""}')
         return True
+
+    def _ctrl_c_copy(self):
+        """Ctrl-C / Ctrl-Insert: copy focused pane, resume if auto-paused.
+
+        Matches mouse select-to-copy: a live selection that auto-paused scroll
+        resumes after a successful copy (`Copied N chars — resumed`). Manual
+        F5 pause stays. No selection → re-toast ``_last_copied``.
+        """
+        buf = self._focused_copy_buffer()
+        if all((
+            buf is not None,
+            self._pause_origin == 'auto',
+            self._selected_text(buf),
+        )):
+            if self._copy_from_buffer(buf, clear_selection=False):
+                n = len(self._last_copied)
+                self._resume_streaming_after_copy()
+                self.state.show_message(
+                    f'Copied {n} char{"s" if n != 1 else ""} — resumed')
+            return
+        self._copy_from_buffer(buf, clear_selection=bool(buf))
 
     def _copy_from_buffer(self, buffer, clear_selection=True):
         """Copy the current selection (or last copy) to the hybrid clipboard.

@@ -914,3 +914,149 @@ def test_right_click_paste_empty_clipboard():
                 _right_ev(0, MouseEventType.MOUSE_UP))
             assert console.state.message == 'Clipboard empty'
             assert console.input_field.buffer.text == ''
+
+
+def test_keyboard_selection_auto_pauses_and_ctrl_c_resumes():
+    """Shift-extend while streaming pauses; Ctrl-C copies and auto-resumes."""
+    from prompt_toolkit.document import Document
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    buf.set_document(Document('hello world'), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    buf.cursor_position = 0
+    assert console.state.scroll_to_end is True
+
+    # Shift-Right twice via the bound handler.
+    from tests.test_conn_display import _binding
+    right = _binding(console, 'shiftright')
+    assert right is not None
+    right(None)
+    right(None)
+    assert console.state.scroll_to_end is False
+    assert console._pause_origin == 'auto'
+    assert console._selected_text(buf) == 'he'
+
+    # Ctrl-C path: auto-resume with — resumed toast.
+    cc = _binding(console, 'controlc')
+    assert cc is not None
+    cc(None)
+    assert 'Copied' in console.state.message
+    assert 'resumed' in console.state.message
+    assert console.state.scroll_to_end is True
+    assert console._pause_origin is None
+    assert buf.selection_state is None
+    assert console.app.clipboard.get_data().text == 'he'
+
+
+def test_keyboard_selection_after_manual_f5_stays_paused():
+    from prompt_toolkit.document import Document
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.terminal_buffer
+    buf.set_document(Document('abcdef'), bypass_readonly=True)
+    console.app.layout.focus(console.terminal_window)
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    buf.cursor_position = 0
+
+    _binding(console, 'shiftright')(None)
+    _binding(console, 'shiftright')(None)
+    assert console._pause_origin == 'manual'
+    assert console.state.scroll_to_end is False
+
+    _binding(console, 'controlc')(None)
+    assert 'Copied' in console.state.message
+    assert 'resumed' not in console.state.message
+    assert console.state.scroll_to_end is False
+    assert console._pause_origin == 'manual'
+
+
+def test_escape_clears_keyboard_selection_and_resumes_auto_pause():
+    from prompt_toolkit.document import Document
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    buf = console.logger_buffer
+    buf.set_document(Document('abcdef'), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    buf.cursor_position = 0
+    _binding(console, 'shiftright')(None)
+    _binding(console, 'shiftright')(None)
+    assert console._pause_origin == 'auto'
+    assert buf.selection_state is not None
+
+    esc = _binding(console, 'escape')
+    assert esc is not None
+    esc(None)
+    assert buf.selection_state is None
+    assert console._selection_span is None
+    assert console.state.scroll_to_end is True
+    assert console._pause_origin is None
+
+
+def test_escape_clears_selection_but_keeps_manual_pause():
+    from prompt_toolkit.document import Document
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    buf = console.logger_buffer
+    buf.set_document(Document('abcdef'), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    buf.cursor_position = 0
+    _binding(console, 'shiftright')(None)
+    assert buf.selection_state is not None
+
+    _binding(console, 'escape')(None)
+    assert buf.selection_state is None
+    assert console.state.scroll_to_end is False
+    assert console._pause_origin == 'manual'
+
+def test_keyboard_extend_from_end_of_pane():
+    """Shift-Up from the scroll tip must mark text (empty selection looked broken)."""
+    from prompt_toolkit.document import Document
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    text = 'line one\nline two\nline three\n'
+    buf = console.logger_buffer
+    buf.set_document(Document(text), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    buf.cursor_position = len(text)
+
+    _binding(console, 'shiftup')(None)
+    assert console._selected_text(buf), 'selecting up from the end copied nothing'
+
+
+def test_keyboard_move_that_goes_nowhere_marks_nothing():
+    from prompt_toolkit.document import Document
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    buf = console.logger_buffer
+    buf.set_document(Document('one line'), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    buf.cursor_position = len('one line')
+
+    _binding(console, 'shiftdown')(None)
+    assert buf.selection_state is None
+    assert console._selection_span is None

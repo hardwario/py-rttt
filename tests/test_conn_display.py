@@ -502,3 +502,96 @@ def test_toast_does_not_change_pane_height():
     assert heights['no_toast'] == heights['toast'], (
         f'toast shifted panes: without={heights["no_toast"]} with={heights["toast"]}'
     )
+
+
+def test_mouse_starts_on():
+    state = State()
+    assert state.mouse_enabled is True
+
+
+def test_f6_toggles_the_mouse():
+    console, _ = _console_with_leaf()
+    handler = _binding(console, 'f6')
+    assert handler is not None, 'F6 is not bound'
+
+    assert console.state.mouse_enabled is True
+    handler(None)
+    assert console.state.mouse_enabled is False
+    handler(None)
+    assert console.state.mouse_enabled is True
+
+
+def test_mouse_support_follows_the_toggle():
+    console, _ = _console_with_leaf()
+    support = console.app.mouse_support
+
+    assert support()
+    console.state.mouse_enabled = False
+    assert not support()
+
+
+def test_mouse_support_still_forced_on_for_the_overlay():
+    console, _ = _console_with_leaf()
+    console.state.mouse_enabled = False
+    console.state.set_conn('rtt', 'disconnected', 'gone')
+    assert console.app.mouse_support()
+
+
+def test_status_bar_shows_f6_mouse_state():
+    state = State()
+    on = _statusbar_joined(state)
+    assert 'F6 Mouse' in on
+    assert 'Mouse OFF' not in on
+
+    state.mouse_enabled = False
+    off = _statusbar_joined(state)
+    assert 'F6 Mouse OFF' in off
+
+
+def test_selection_keys_mark_text_in_a_read_only_pane():
+    from prompt_toolkit.document import Document
+
+    console, _ = _console_with_leaf()
+    console.terminal_buffer.set_document(Document('abcdef'), True)
+    console.app.layout.focus(console.terminal_buffer)
+    console.terminal_buffer.cursor_position = 0
+
+    handler = _binding(console, 'shiftright')
+    assert handler is not None, 'Shift-Right is not bound'
+    handler(None)
+    handler(None)
+
+    buffer = console.terminal_buffer
+    assert buffer.selection_state is not None
+    assert buffer.copy_selection().text == 'ab'
+
+
+def test_ctrl_a_selects_the_whole_pane():
+    from prompt_toolkit.document import Document
+
+    console, _ = _console_with_leaf()
+    console.logger_buffer.set_document(Document('line one\nline two'), True)
+    console.app.layout.focus(console.logger_buffer)
+
+    handler = _binding(console, 'controla')
+    assert handler is not None
+    handler(None)
+
+    assert console.logger_buffer.copy_selection().text == 'line one\nline two'
+
+
+def test_selection_key_filters_inactive_on_command():
+    """Eager Shift/Ctrl-A must not fire while Command is focused."""
+    console, _ = _console_with_leaf()
+    console.app.layout.focus(console.input_field)
+    wanted = {'s-left', 's-right', 's-up', 's-down', 's-home', 's-end', 'c-a'}
+    inactive = 0
+    for b in console.app.key_bindings.bindings:
+        vals = {getattr(k, 'value', str(k)) for k in b.keys}
+        hit = vals & wanted
+        if not hit:
+            continue
+        assert b.filter is not None
+        assert not b.filter(), f'{hit} filter active on Command'
+        inactive += 1
+    assert inactive >= 5, f'expected pane selection bindings, found {inactive}'
