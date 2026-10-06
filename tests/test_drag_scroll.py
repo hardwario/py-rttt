@@ -117,9 +117,9 @@ def test_drag_scroll_updates_pinned_scroll():
     buf = _fill(console, 40)
     console.state.scroll_to_end = False
     console._pause_origin = 'manual'
-    console._pinned_scroll[buf] = 20
     window = console.logger_window.window
     window.vertical_scroll = 20
+    console._pinned_abs_top[buf] = console._rel_to_abs_top(buf, 20)
 
     class _Info:
         content_height = 40
@@ -131,4 +131,4 @@ def test_drag_scroll_updates_pinned_scroll():
     buf.cursor_position = start + 3
     console._drag_scroll_and_extend(buf, direction=-1, steps=3)
     assert window.vertical_scroll == 17
-    assert console._pinned_scroll[buf] == 17
+    assert console._pinned_abs_top[buf] == console._rel_to_abs_top(buf, 17)
