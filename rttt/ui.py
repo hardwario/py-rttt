@@ -201,8 +201,13 @@ class OffsetNumberedMargin(NumberedMargin):
     def get_width(self, get_ui_content):
         ui = get_ui_content()
         if self.get_line_number is not None and ui.line_count > 0:
-            last = self.get_line_number(ui.line_count - 1)
-            return max(3, len(f"{max(1, last)}") + 1)
+            last = None
+            for i in range(ui.line_count - 1, -1, -1):
+                last = self.get_line_number(i)
+                if last is not None:
+                    break
+            if last is not None:
+                return max(3, len(f"{max(1, last)}") + 1)
         line_count = ui.line_count + max(0, self.get_offset())
         return max(3, len(f"{line_count}") + 1)
 
@@ -222,7 +227,10 @@ class OffsetNumberedMargin(NumberedMargin):
                         display = self.get_line_number(lineno)
                     else:
                         display = lineno + 1 + offset
-                    if lineno == current_lineno:
+                    # None = phantom empty row after a trailing newline — no gutter.
+                    if display is None:
+                        result.append(("", " " * width))
+                    elif lineno == current_lineno:
                         if relative:
                             result.append((style_current, "%i" % display))
                         else:
@@ -404,6 +412,8 @@ def create_layout(state, history_file):
         ]
     )
 
+    # Always present so F7 can focus on the first press (ConditionalContainer
+    # stays zero-height until the next layout pass and drops the first key).
     filter_field = TextArea(
         height=1,
         prompt='Filter: ',
@@ -411,16 +421,13 @@ def create_layout(state, history_file):
         multiline=False,
         wrap_lines=False,
         focusable=True,
-    )
-    filter_bar = ConditionalContainer(
-        content=filter_field,
-        filter=Condition(lambda: state.filter_editing or bool(state.log_filter)),
+        focus_on_click=True,
     )
     pause_badge = create_log_pause_badge(state)
     hs_logger = HSplit([
         logger_window,
         logger_search,
-        filter_bar,
+        filter_field,
         pause_badge,
     ])
 

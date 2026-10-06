@@ -421,12 +421,11 @@ class Console:
         r'(?:<(\w+)>)|(?:#.*?\d(?:\.\d+)? <(\w)>)')
 
     def _open_log_filter(self):
-        """Show the Log filter row and focus it.
+        """Focus the always-present Log filter row so the first typed char lands.
 
-        The filter sits in a ConditionalContainer that was zero-height until
-        ``filter_editing`` flips. Focusing in the same key-handler turn can
-        lose to the next redraw (Log is read_only → the first typed character
-        is dropped). Re-assert focus after a yield so the first key lands.
+        The filter field is always in the Log pane layout (not a
+        ConditionalContainer), so the first F7 can focus it in the same
+        key-handler turn without waiting for a layout pass.
         """
         self.state.filter_editing = True
         fb = self.filter_field.buffer
@@ -435,36 +434,17 @@ class Console:
         if not self.app:
             return
         app = self.app
-
-        def _focus_filter():
-            try:
-                app.layout.focus(self.filter_field)
-            except Exception:
-                pass
-
-        _focus_filter()
+        try:
+            app.layout.focus(self.filter_field)
+        except Exception:
+            pass
         app.invalidate()
-
-        if not getattr(app, 'is_running', False):
-            return
-
-        async def _refocus():
-            # A couple of event-loop turns cover the ConditionalContainer
-            # becoming focusable after layout.
-            for _ in range(5):
-                await asyncio.sleep(0)
-                if not self.state.filter_editing:
-                    return
-                _focus_filter()
-                if self.has_focus(self.filter_field):
-                    return
-
-        app.create_background_task(_refocus())
 
     def _filter_accept_handler(self, buff):
         expr = (buff.text or '').strip()
         self._apply_log_filter(expr)
-        self.state.filter_editing = bool(expr)
+        # Field stays visible; editing ends after Enter.
+        self.state.filter_editing = False
         if self.app:
             try:
                 self.app.layout.focus(self.input_field)
@@ -545,8 +525,10 @@ class Console:
     def _rebuild_log_view(self):
         """Rebuild logger_buffer from capped raw lines + active filter.
 
-        Preserves the paused viewport (same absolute lines) so a trim cannot
-        yank the Log pane to the end via Document()'s default end cursor.
+        Preserves the paused viewport (same absolute lines) so a trim or a
+        filtered rebuild cannot yank the Log pane to the end via Document()'s
+        default end cursor. Maps ``_pinned_abs_top`` through the filtered
+        absolute line-number list (first visible abs ≥ pin, else oldest).
         Also refreshes ``_log_view_abs_line_nos`` for the gutter.
         """
         buf = self.logger_buffer
@@ -599,7 +581,10 @@ class Console:
             self._pinned_abs_top[buf] = abs_nos[new_scroll] - 1
         if text_out:
             doc = Document(text_out)
-            row = min(new_scroll, max(0, doc.line_count - 1))
+            # Prefer a real content row; Document counts a trailing empty line
+            # after a final newline — keep the cursor off that phantom / EOF.
+            max_row = max(0, len(abs_nos) - 1) if abs_nos else max(0, doc.line_count - 1)
+            row = min(new_scroll, max_row)
             cursor = doc.translate_row_col_to_index(row, 0)
         else:
             cursor = 0
@@ -607,12 +592,20 @@ class Console:
             Document(text_out, cursor_position=cursor), bypass_readonly=True)
         if window is not None:
             window.vertical_scroll = new_scroll
+        # Re-assert from absolute pin (filtered abs list) after Document replace.
+        if buf in self._pinned_abs_top:
+            self._apply_pinned_viewport(buf)
 
     def _append_log_line(self, line: str):
-        """Append to the raw Log store and to the visible view when it matches."""
+        """Append to the raw Log store and to the visible view when it matches.
+
+        With an active filter every append rebuilds the view so the paused
+        absolute pin is remapped through ``_log_view_abs_line_nos`` (incremental
+        append left the cursor at EOF and let the filtered top drift).
+        """
         self._log_lines.append(line)
         dropped = self._trim_log_line_list()
-        if dropped:
+        if dropped or self.state.log_filter:
             self._rebuild_log_view()
             if not self.state.scroll_to_end:
                 self.state.paused_appended += 1
@@ -641,9 +634,11 @@ class Console:
         if buf is self.logger_buffer:
             def _log_line_number(lineno, b=buf):
                 nos = self._log_view_abs_line_nos
-                if nos and 0 <= lineno < len(nos):
+                if 0 <= lineno < len(nos):
                     return nos[lineno]
-                return lineno + 1 + self._line_offset.get(b, 0)
+                # Phantom empty Document row after a trailing newline, or a
+                # row past the filtered view — leave the gutter blank.
+                return None
             line_number_fn = _log_line_number
 
         window.left_margins = [
