@@ -197,6 +197,10 @@ class Console:
                 self._clear_pinned_scroll()
                 for buf in (self.terminal_buffer, self.logger_buffer):
                     buf.exit_selection()
+                # Deferred trims while paused — catch up now that follow-tail
+                # is back, then park cursors at EOF.
+                self._trim_all_panes_to_cap()
+                for buf in (self.terminal_buffer, self.logger_buffer):
                     buf.cursor_position = len(buf.text)
             else:
                 self._pause_origin = 'manual'
@@ -508,9 +512,11 @@ class Console:
             return self._log_filter_re.search(line) is not None
         return True
 
-    def _trim_log_line_list(self):
+    def _trim_log_line_list(self, force=False):
         max_lines = self.max_lines
         if max_lines <= 0:
+            return 0
+        if not force and not self._trim_while_streaming():
             return 0
         n = len(self._log_lines)
         limit = int(max_lines * (1 + TRIM_HYSTERESIS))
@@ -599,13 +605,14 @@ class Console:
     def _append_log_line(self, line: str):
         """Append to the raw Log store and to the visible view when it matches.
 
-        With an active filter every append rebuilds the view so the paused
-        absolute pin is remapped through ``_log_view_abs_line_nos`` (incremental
-        append left the cursor at EOF and let the filtered top drift).
+        Matching lines are appended incrementally; ``_restore_pinned_scroll``
+        keeps the paused viewport on the absolute pin. A full rebuild runs
+        only when trim drops oldest raw rows (follow-tail), not on every
+        filtered append (that was O(n) per line and caused UI lag).
         """
         self._log_lines.append(line)
         dropped = self._trim_log_line_list()
-        if dropped or self.state.log_filter:
+        if dropped:
             self._rebuild_log_view()
             if not self.state.scroll_to_end:
                 self.state.paused_appended += 1
@@ -753,6 +760,26 @@ class Console:
     def _clear_pinned_scroll(self):
         self._pinned_abs_top.clear()
 
+    def _trim_while_streaming(self):
+        """Trim only while follow-tail is on.
+
+        Pausing must freeze the visible absolute lines. Trimming oldest rows
+        while paused eventually deletes the pin and the viewport slides with
+        the new oldest line — the GUI "filtered Log keeps scrolling" bug.
+        Raw lines / Terminal text may grow past max_lines until resume.
+        """
+        return bool(self.state.scroll_to_end)
+
+    def _trim_all_panes_to_cap(self):
+        """Drop overflow after resume (or whenever follow-tail is restored)."""
+        if self.max_lines <= 0:
+            return
+        # Log: trim raw store then rebuild the (filtered) view.
+        if self._trim_log_line_list():
+            self._rebuild_log_view()
+        # Terminal: trim visible buffer directly.
+        self._trim_oldest_lines(self.terminal_buffer)
+
     def _apply_pinned_viewport(self, buffer):
         """Set vertical_scroll + cursor from the absolute pin for ``buffer``."""
         window = self._window_for_buffer(buffer)
@@ -765,19 +792,41 @@ class Console:
         if line_count <= 0:
             window.vertical_scroll = 0
             return
+        # Trailing newline adds a phantom empty Document row. Treat only real
+        # content rows as cursor targets so Window cannot scroll-to-EOF while
+        # vertical_scroll is pinned (cursor-in-viewport check used to accept
+        # the phantom as "visible" and leave the cursor at the end).
+        if buffer is self.logger_buffer and self._log_view_abs_line_nos:
+            real_lines = len(self._log_view_abs_line_nos)
+        elif buffer.text.endswith('\n') and line_count > 0:
+            real_lines = line_count - 1
+        else:
+            real_lines = line_count
+        if real_lines <= 0:
+            window.vertical_scroll = 0
+            return
         first = self._abs_to_rel_top(buffer, abs_top)
-        first = max(0, min(first, line_count - 1))
+        first = max(0, min(first, real_lines - 1))
         # Keep absolute pin in sync when clamp refreshed it.
         self._pinned_abs_top[buffer] = self._rel_to_abs_top(buffer, first)
         height = self._pane_height(buffer, window)
-        last = max(first, min(first + height - 1, line_count - 1))
+        last = max(first, min(first + height - 1, real_lines - 1))
         try:
             row = buffer.document.cursor_position_row
         except Exception:
             row = first
         if row < first or row > last:
-            buffer.cursor_position = buffer.document.translate_row_col_to_index(
-                first, 0)
+            if row >= real_lines:
+                # EOF phantom: sit at the end of the last real line in the
+                # pinned window so Shift+Up-from-end still covers that line.
+                # Col=len(line) is the newline / line-end position.
+                line = buffer.document.lines[last]
+                buffer.cursor_position = buffer.document.translate_row_col_to_index(
+                    last, len(line))
+            else:
+                # Below the window but still a content row — snap to top.
+                buffer.cursor_position = buffer.document.translate_row_col_to_index(
+                    first, 0)
         window.vertical_scroll = first
 
     def _clamp_cursor_to_pinned(self, buffer):
@@ -796,16 +845,22 @@ class Console:
             return
         self._apply_pinned_viewport(buffer)
 
-    def _trim_oldest_lines(self, buffer):
+    def _trim_oldest_lines(self, buffer, force=False):
         """Drop oldest lines when the pane exceeds max_lines (+ hysteresis).
 
         Returns the number of characters removed from the start (0 if none).
         Selection / cursor indices and the paused viewport scroll offset are
         shifted so a paused view does not jump; line-number margin keeps an
         absolute offset so numbers do not restart at 1.
+
+        While paused, trimming is deferred (see ``_trim_while_streaming``) so
+        the absolute pin cannot be deleted out from under the viewport.
+        Pass ``force=True`` only from tests that exercise remap math.
         """
         max_lines = self.max_lines
         if max_lines <= 0:
+            return 0
+        if not force and not self._trim_while_streaming():
             return 0
         text = buffer.text
         nlines = text.count('\n')
@@ -1042,6 +1097,8 @@ class Console:
         self._clear_pinned_scroll()
         for buf in (self.terminal_buffer, self.logger_buffer):
             buf.exit_selection()
+        self._trim_all_panes_to_cap()
+        for buf in (self.terminal_buffer, self.logger_buffer):
             buf.cursor_position = len(buf.text)
 
     def _clear_other_pane_selection(self, buffer):

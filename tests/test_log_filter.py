@@ -4,6 +4,20 @@ from rttt.connectors.demo import DemoConnector
 from rttt.console import Console
 
 
+def _simulate_window_scroll_to_cursor(console):
+    """Mimic prompt_toolkit keeping the cursor inside the visible window."""
+    buf = console.logger_buffer
+    window = console.logger_window.window
+    h = console._pane_height(buf, window)
+    crow = buf.document.cursor_position_row
+    vs = window.vertical_scroll
+    if crow < vs:
+        window.vertical_scroll = crow
+    elif crow >= vs + h:
+        window.vertical_scroll = max(0, crow - h + 1)
+
+
+
 def _fill_levels(console):
     for i, lvl in enumerate(['D', 'I', 'W', 'E', 'I', 'W']):
         console._append_log_line(f'# {i}.0 <{lvl}> log {i} noise\n')
@@ -122,7 +136,7 @@ def test_filter_open_refocuses_input():
 
 
 def test_filtered_paused_append_keeps_absolute_top_without_trim():
-    """Filter + F5: rebuild-on-append must not drift the pinned absolute top."""
+    """Filter + F5: incremental append + pin restore must hold the absolute top."""
     console = Console(DemoConnector(delay=10), history_file=None, max_lines=0)
     for i in range(80):
         lvl = ['I', 'W', 'E', 'D'][i % 4]
@@ -144,6 +158,7 @@ def test_filtered_paused_append_keeps_absolute_top_without_trim():
     for i in range(80, 300):
         lvl = ['I', 'W', 'E', 'D'][i % 4]
         console._append_log_line(f'# {i}.0 <{lvl}> line {i}\n')
+        _simulate_window_scroll_to_cursor(console)
     assert console._line_offset.get(buf, 0) == 0
     assert window.vertical_scroll >= 0
     top_after = console._log_view_abs_line_nos[window.vertical_scroll]
@@ -214,3 +229,92 @@ def test_f7_key_focuses_filter_on_first_press():
             await app.run_async()
 
     asyncio.run(_run())
+
+def test_filtered_follow_tail_pause_holds_gutter_with_cap():
+    """GUI failure on d96bba7: filter + F5 + max-lines → Log gutter climbed.
+
+    Follow-tail leaves vertical_scroll stale 0 and the cursor on the phantom
+    EOF row. Previous fix rebuilt on every filtered append but still trimmed
+    while paused, so once the absolute pin was deleted the viewport slid with
+    the new oldest line (178 → 342 → 562). Pause must defer trimming so the
+    absolute top stays fixed even past the cap; Window scroll-to-cursor must
+    not yank the view either.
+    """
+    console = Console(DemoConnector(delay=10), history_file=None, max_lines=300)
+    for i in range(250):
+        lvl = ['I', 'W', 'E', 'D'][i % 4]
+        console._append_log_line(f'# {i}.0 <{lvl}> line {i}\n')
+    console._apply_log_filter('level:wrn')
+    buf = console.logger_buffer
+    window = console.logger_window.window
+    # Live follow-tail before paint.
+    window.vertical_scroll = 0
+    buf.cursor_position = len(buf.text)
+    _simulate_window_scroll_to_cursor(console)
+
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    console.state.paused_appended = 0
+    console._pin_viewports()
+    # Pin must pull the cursor off the phantom EOF row immediately.
+    assert buf.cursor_position < len(buf.text)
+    real = len(console._log_view_abs_line_nos)
+    assert buf.document.cursor_position_row < real
+    _simulate_window_scroll_to_cursor(console)
+
+    top0 = console._log_view_abs_line_nos[window.vertical_scroll]
+    pin0 = console._pinned_abs_top[buf]
+    content0 = buf.text.splitlines()[window.vertical_scroll]
+    assert top0 > 0 and pin0 is not None
+
+    for i in range(250, 1200):
+        lvl = ['I', 'W', 'E', 'D'][i % 4]
+        console._append_log_line(f'# {i}.0 <{lvl}> line {i}\n')
+        _simulate_window_scroll_to_cursor(console)
+        top = console._log_view_abs_line_nos[window.vertical_scroll]
+        assert top == top0, (i, top0, top, console._line_offset.get(buf, 0))
+        assert console._pinned_abs_top[buf] == pin0
+        assert buf.text.splitlines()[window.vertical_scroll] == content0
+
+    # Cap deferred: raw store grew well past max_lines.
+    assert len(console._log_lines) > 300
+    assert console._line_offset.get(buf, 0) == 0
+    assert console.state.paused_appended == 1200 - 250
+
+
+def test_filtered_paused_pin_moves_cursor_off_phantom_eof():
+    """_apply_pinned_viewport must not treat the trailing empty row as in-view."""
+    console = Console(DemoConnector(delay=10), history_file=None, max_lines=0)
+    for i in range(80):
+        lvl = ['I', 'W', 'E', 'D'][i % 4]
+        console._append_log_line(f'# {i}.0 <{lvl}> line {i}\n')
+    console._apply_log_filter('level:wrn')
+    buf = console.logger_buffer
+    window = console.logger_window.window
+    window.vertical_scroll = 0
+    buf.cursor_position = len(buf.text)
+    assert buf.text.endswith('\n')
+    assert buf.document.cursor_position_row == buf.document.line_count - 1
+    console.state.scroll_to_end = False
+    console._pin_viewports()
+    assert buf.cursor_position < len(buf.text)
+    crow = buf.document.cursor_position_row
+    # Cursor parks on the last real row of the pinned window (not phantom).
+    assert crow < len(console._log_view_abs_line_nos)
+    assert crow >= window.vertical_scroll
+    assert crow <= window.vertical_scroll + console._pane_height(buf) - 1
+
+
+def test_log_layout_paused_badge_above_filter():
+    """PAUSED sits under the Log TextArea; Filter stays below (no row steal)."""
+    from prompt_toolkit.layout.containers import HSplit, ConditionalContainer
+    console = Console(DemoConnector(delay=10), history_file=None)
+    # Frame(hs_logger) → body VSplit → DynamicContainer → HSplit
+    log_frame = console.app.layout.container.content.children[0].content.children[1]
+    hs_logger = log_frame.children[1].children[1].get_container()
+    assert isinstance(hs_logger, HSplit)
+    kids = hs_logger.children
+    # TextArea resolves to its Window via __pt_container__.
+    assert kids[0] is console.logger_window.window
+    assert isinstance(kids[1], ConditionalContainer)
+    assert kids[3] is console.filter_field.window
