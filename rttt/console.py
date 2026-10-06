@@ -59,9 +59,11 @@ class Console:
         self._selection_span = None  # tuple[Buffer, int, int] | None
         # True after mouse-up / copy inclusive bump so we do not double-bump.
         self._selection_inclusive = False
-        # While paused: pinned vertical_scroll per buffer so Window's
-        # keep-cursor-visible logic cannot walk the viewport as lines append.
-        self._pinned_scroll = {}  # Buffer -> int
+        # While paused: absolute 0-based line index of the first visible row
+        # per buffer. Relative vertical_scroll alone is wrong after trim (same
+        # index points at newer text) and is often stale 0 while follow-tail
+        # keeps the cursor at EOF without updating Window.vertical_scroll.
+        self._pinned_abs_top = {}  # Buffer -> int
         # Absolute line numbers parallel to the visible Log view (filter).
         self._log_view_abs_line_nos = []
         # Timer-driven edge autoscroll while dragging outside a pane.
@@ -549,16 +551,20 @@ class Console:
         """
         buf = self.logger_buffer
         window = self._window_for_buffer(buf)
-        anchor_abs = None
-        if not self.state.scroll_to_end and window is not None:
-            pin = self._pinned_scroll.get(buf, window.vertical_scroll)
-            nos = self._log_view_abs_line_nos
-            if nos:
-                idx = max(0, min(int(pin), len(nos) - 1))
-                anchor_abs = nos[idx]
-            else:
-                base = self._line_offset.get(buf, 0)
-                anchor_abs = base + max(0, int(pin)) + 1
+        # Prefer the absolute pin (0-based); fall back to current relative view.
+        anchor_abs_0 = None
+        if not self.state.scroll_to_end:
+            if buf in self._pinned_abs_top:
+                anchor_abs_0 = self._pinned_abs_top[buf]
+            elif window is not None:
+                pin = window.vertical_scroll
+                nos = self._log_view_abs_line_nos
+                if nos:
+                    idx = max(0, min(int(pin), len(nos) - 1))
+                    anchor_abs_0 = nos[idx] - 1
+                else:
+                    base = self._line_offset.get(buf, 0)
+                    anchor_abs_0 = base + max(0, int(pin))
 
         visible = []
         abs_nos = []
@@ -568,38 +574,39 @@ class Console:
                 visible.append(ln)
                 abs_nos.append(base + i + 1)
         self._log_view_abs_line_nos = abs_nos
-        text = ''.join(visible)
+        text_out = ''.join(visible)
 
         if self._selection_span is not None and self._selection_span[0] is buf:
             self._selection_span = None
 
         if self.state.scroll_to_end:
-            cursor = len(text)
+            cursor = len(text_out)
             buf.set_document(
-                Document(text, cursor_position=cursor), bypass_readonly=True)
+                Document(text_out, cursor_position=cursor), bypass_readonly=True)
             return
 
         # Paused: place cursor on the anchored row so Window will not scroll.
         new_scroll = 0
-        if anchor_abs is not None and abs_nos:
+        if anchor_abs_0 is not None and abs_nos:
             new_scroll = 0
             for i, n in enumerate(abs_nos):
-                if n >= anchor_abs:
+                if n - 1 >= anchor_abs_0:
                     new_scroll = i
                     break
             else:
-                new_scroll = max(0, len(abs_nos) - 1)
-        if text:
-            doc = Document(text)
+                # Entire pinned window trimmed away — clamp to oldest remaining.
+                new_scroll = 0
+            self._pinned_abs_top[buf] = abs_nos[new_scroll] - 1
+        if text_out:
+            doc = Document(text_out)
             row = min(new_scroll, max(0, doc.line_count - 1))
             cursor = doc.translate_row_col_to_index(row, 0)
         else:
             cursor = 0
         buf.set_document(
-            Document(text, cursor_position=cursor), bypass_readonly=True)
+            Document(text_out, cursor_position=cursor), bypass_readonly=True)
         if window is not None:
             window.vertical_scroll = new_scroll
-        self._pinned_scroll[buf] = new_scroll
 
     def _append_log_line(self, line: str):
         """Append to the raw Log store and to the visible view when it matches."""
@@ -649,39 +656,125 @@ class Console:
             return self.terminal_window.window
         return None
 
+    def _pane_height(self, buffer, window=None):
+        """Best-effort visible row count for a pane (render_info / geom / 20)."""
+        if window is None:
+            window = self._window_for_buffer(buffer)
+        if window is not None:
+            info = window.render_info
+            if info is not None and info.window_height:
+                return int(info.window_height)
+        geom = self._pane_geom.get(buffer)
+        if geom is not None and geom.get('height'):
+            return max(1, int(geom['height']))
+        return 20
+
+    def _rel_to_abs_top(self, buffer, rel):
+        """Convert a relative vertical_scroll to a 0-based absolute line index."""
+        rel = max(0, int(rel))
+        if buffer is self.logger_buffer and self._log_view_abs_line_nos:
+            nos = self._log_view_abs_line_nos
+            if not nos:
+                return self._line_offset.get(buffer, 0) + rel
+            idx = min(rel, len(nos) - 1)
+            return nos[idx] - 1
+        return self._line_offset.get(buffer, 0) + rel
+
+    def _abs_to_rel_top(self, buffer, abs_top):
+        """Convert a 0-based absolute line index to relative vertical_scroll.
+
+        When the pinned window was fully trimmed away, clamp to the oldest
+        remaining line (relative 0) and refresh the absolute pin.
+        """
+        abs_top = max(0, int(abs_top))
+        if buffer is self.logger_buffer and self._log_view_abs_line_nos:
+            nos = self._log_view_abs_line_nos
+            if not nos:
+                return 0
+            for i, n in enumerate(nos):
+                if n - 1 >= abs_top:
+                    return i
+            # Fully past the end of the view — show newest remaining.
+            return max(0, len(nos) - 1)
+        offset = self._line_offset.get(buffer, 0)
+        if abs_top < offset:
+            # Entire pinned window trimmed away — stay on oldest kept lines.
+            self._pinned_abs_top[buffer] = offset
+            return 0
+        return abs_top - offset
+
+    def _compute_current_rel_top(self, buffer):
+        """Relative top of the visible window, even when vertical_scroll is stale.
+
+        While follow-tail is active, prompt_toolkit often leaves
+        ``Window.vertical_scroll`` at 0 and only keeps the cursor at EOF; the
+        next paint then scrolls. Pinning that stale 0 freezes the *oldest*
+        lines, so trim makes absolute gutter numbers climb. Prefer
+        render_info, else treat cursor-near-EOF + scroll 0 as the last page.
+        """
+        window = self._window_for_buffer(buffer)
+        line_count = buffer.document.line_count
+        if line_count <= 0:
+            return 0
+        height = self._pane_height(buffer, window)
+        if window is not None:
+            info = window.render_info
+            if info is not None:
+                try:
+                    return max(0, min(int(info.first_visible_line()),
+                                      line_count - 1))
+                except Exception:
+                    pass
+            vs = max(0, int(window.vertical_scroll))
+        else:
+            vs = 0
+        try:
+            cursor_row = buffer.document.cursor_position_row
+        except Exception:
+            cursor_row = 0
+        last_page = max(0, line_count - height)
+        # Stale scroll=0 while the cursor sits on the last page ⇒ follow-tail.
+        if vs == 0 and cursor_row >= last_page and line_count > height:
+            return last_page
+        return max(0, min(vs, line_count - 1))
+
     def _pin_viewports(self):
-        """Freeze both panes' vertical_scroll + clamp cursors into view.
+        """Freeze both panes on the currently visible absolute lines.
 
         prompt_toolkit Window always scrolls to keep the cursor visible. After
         F5 the cursor is often still at the buffer end, so each append would
         drag the viewport down unless we pin scroll and keep the cursor inside
-        the frozen rows.
+        the frozen rows. Pins are absolute so a later trim cannot slide the
+        view onto newer content.
         """
         for buf in (self.terminal_buffer, self.logger_buffer):
             window = self._window_for_buffer(buf)
             if window is None:
                 continue
-            self._pinned_scroll[buf] = max(0, int(window.vertical_scroll))
-            self._clamp_cursor_to_pinned(buf)
+            rel = self._compute_current_rel_top(buf)
+            self._pinned_abs_top[buf] = self._rel_to_abs_top(buf, rel)
+            self._apply_pinned_viewport(buf)
 
     def _clear_pinned_scroll(self):
-        self._pinned_scroll.clear()
+        self._pinned_abs_top.clear()
 
-    def _clamp_cursor_to_pinned(self, buffer):
-        """Move cursor onto a pinned visible row so Window will not scroll."""
+    def _apply_pinned_viewport(self, buffer):
+        """Set vertical_scroll + cursor from the absolute pin for ``buffer``."""
         window = self._window_for_buffer(buffer)
         if window is None:
             return
-        pin = self._pinned_scroll.get(buffer)
-        if pin is None:
+        abs_top = self._pinned_abs_top.get(buffer)
+        if abs_top is None:
             return
         line_count = buffer.document.line_count
         if line_count <= 0:
             window.vertical_scroll = 0
             return
-        info = window.render_info
-        height = (info.window_height if info is not None else None) or 20
-        first = max(0, min(int(pin), line_count - 1))
+        first = self._abs_to_rel_top(buffer, abs_top)
+        first = max(0, min(first, line_count - 1))
+        # Keep absolute pin in sync when clamp refreshed it.
+        self._pinned_abs_top[buffer] = self._rel_to_abs_top(buffer, first)
+        height = self._pane_height(buffer, window)
         last = max(first, min(first + height - 1, line_count - 1))
         try:
             row = buffer.document.cursor_position_row
@@ -691,7 +784,10 @@ class Console:
             buffer.cursor_position = buffer.document.translate_row_col_to_index(
                 first, 0)
         window.vertical_scroll = first
-        self._pinned_scroll[buffer] = first
+
+    def _clamp_cursor_to_pinned(self, buffer):
+        """Move cursor onto a pinned visible row so Window will not scroll."""
+        self._apply_pinned_viewport(buffer)
 
     def _restore_pinned_scroll(self, buffer):
         """Re-apply a pinned viewport after a streaming append while paused.
@@ -701,9 +797,9 @@ class Console:
         """
         if self.state.scroll_to_end:
             return
-        if buffer not in self._pinned_scroll:
+        if buffer not in self._pinned_abs_top:
             return
-        self._clamp_cursor_to_pinned(buffer)
+        self._apply_pinned_viewport(buffer)
 
     def _trim_oldest_lines(self, buffer):
         """Drop oldest lines when the pane exceeds max_lines (+ hysteresis).
@@ -759,14 +855,8 @@ class Console:
             else:
                 drag_sel_shift = (max(0, orig), max(0, cur), stype)
 
-        # Keep paused viewport stable: content shifted up by `drop` lines.
-        window = self._window_for_buffer(buffer)
-        if window is not None and not self.state.scroll_to_end:
-            window.vertical_scroll = max(0, window.vertical_scroll - drop)
-            if buffer in self._pinned_scroll:
-                self._pinned_scroll[buffer] = max(
-                    0, self._pinned_scroll[buffer] - drop)
-
+        # Absolute pin stays put; relative scroll is recomputed after text
+        # mutation via _apply_pinned_viewport (absolute - new offset).
         buffer._set_text(new_text)
         # Caller always follows with _text_changed + selection restore; we
         # only mutate text here. Return so insert path can restore.
@@ -780,9 +870,11 @@ class Console:
         elif self.state.scroll_to_end:
             buffer.cursor_position = len(buffer.text)
         else:
-            # Paused, no selection: keep cursor in range.
+            # Paused, no selection: keep cursor in range, then re-pin.
             buffer.cursor_position = min(
                 max(0, buffer.cursor_position - removed_chars), len(buffer.text))
+        if not self.state.scroll_to_end and buffer in self._pinned_abs_top:
+            self._apply_pinned_viewport(buffer)
         return removed_chars
 
     def _buffer_insert_text(self, buffer, line):
@@ -1256,7 +1348,8 @@ class Console:
                 if window.vertical_scroll < max_scroll:
                     window.vertical_scroll += 1
         if not self.state.scroll_to_end:
-            self._pinned_scroll[buffer] = max(0, int(window.vertical_scroll))
+            self._pinned_abs_top[buffer] = self._rel_to_abs_top(
+                buffer, max(0, int(window.vertical_scroll)))
         line_count = buffer.document.line_count
         if line_count <= 0:
             return None
