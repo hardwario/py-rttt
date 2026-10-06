@@ -55,7 +55,6 @@ def save_trusted(trusted: dict[str, str]) -> None:
             f.write(f'{trusted[path]}  {path}\n')
 
 
-
 def _tty_streams():
     """Return (in, out) streams for interactive prompts, preferring /dev/tty.
 

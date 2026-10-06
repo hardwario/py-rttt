@@ -444,14 +444,14 @@ class Console:
 
             result = original(mouse_event)
 
-            if (
-                mouse_event.event_type == MouseEventType.MOUSE_MOVE
-                and self._drag_buffer is buf
-                and mouse_event.button != MouseButton.NONE
-                and not self._paused_for_drag
-                and self._drag_was_scrolling
-                and buf.selection_state is not None
-            ):
+            if all((
+                mouse_event.event_type == MouseEventType.MOUSE_MOVE,
+                self._drag_buffer is buf,
+                mouse_event.button != MouseButton.NONE,
+                not self._paused_for_drag,
+                self._drag_was_scrolling,
+                buf.selection_state is not None,
+            )):
                 self._paused_for_drag = self._pause_auto_scroll_for_selection(
                     toast=False)
 
@@ -467,17 +467,13 @@ class Console:
                             self._copy_from_buffer(buf, clear_selection=False))
                     else:
                         buf.exit_selection()
-                        if (
-                            self._selection_span is not None
-                            and self._selection_span[0] is buf
-                        ):
+                        span = self._selection_span
+                        if span is not None and span[0] is buf:
                             self._selection_span = None
                 else:
                     buf.exit_selection()
-                    if (
-                        self._selection_span is not None
-                        and self._selection_span[0] is buf
-                    ):
+                    span = self._selection_span
+                    if span is not None and span[0] is buf:
                         self._selection_span = None
 
                 if copied and self._pause_origin == 'auto':

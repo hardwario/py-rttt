@@ -103,7 +103,6 @@ def _build_demo_connector(*, device, serial, auto_reconnect, substitutions, app,
     )
 
 
-
 def _prepare_tty_for_console():
     """Avoid a one-shot trust answer leaving stdin at EOF for the TUI."""
     try:
