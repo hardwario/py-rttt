@@ -43,7 +43,7 @@ class State:
         self.message_expires = 0.0
 
     def show_message(self, text, seconds=2.0):
-        """Show an ephemeral toast inside the status bar (style class:message)."""
+        """Show an ephemeral toast on the right of the status bar (replaces clock)."""
         self.message = text or ''
         self.message_expires = time.monotonic() + seconds if text else 0.0
         if not self.app:
@@ -235,6 +235,8 @@ def create_status_bar(state):
     Pause state and ephemeral toasts live in this single row so pane heights
     never jump when a message appears (a separate toast strip pushed both
     panes up one line and made drag hit the wrong line).
+
+    Toasts replace the clock on the right; left-side hints stay visible.
     """
     def get_statusbar_text():
         paused = not state.scroll_to_end
@@ -244,13 +246,8 @@ def create_status_bar(state):
             # (F5, auto-pause on drag move, stays until resume).
             items.append(('class:paused', ' PAUSED '))
 
-        toast = state.current_message()
-        if toast:
-            # Temporarily replace the hint cheatsheet; keep RTTT / PAUSED / clock.
-            items.append(('class:message', f' {toast} '))
-            return items
-
         # Keep hints short so Copy / Shift-drag stay visible around 80–100 cols.
+        # Hints stay up while a toast is showing on the right (replacing clock).
         f5_style = 'class:yellow' if paused else 'class:title'
         f5_label = ' F5 Resume ' if paused else ' F5 Pause '
         f6_style = 'class:title' if state.mouse_enabled else 'class:yellow'
@@ -269,8 +266,18 @@ def create_status_bar(state):
         # transport is down, so a second copy on the bar is just noise.
         return items
 
-    def get_statusbar_time():
+    def get_statusbar_right():
+        toast = state.current_message()
+        if toast:
+            return [('class:message', f' {toast} ')]
         return datetime.now().strftime('%H:%M:%S')
+
+    def right_width():
+        toast = state.current_message()
+        if toast:
+            # Cap so a long hint cannot crush the left cheatsheet entirely.
+            return LayoutDimension.exact(min(max(len(toast) + 2, 10), 56))
+        return LayoutDimension.exact(10)
 
     return ConditionalContainer(
         content=VSplit([
@@ -278,9 +285,9 @@ def create_status_bar(state):
                 FormattedTextControl(get_statusbar_text), style="class:status"
             ),
             Window(
-                FormattedTextControl(get_statusbar_time),
+                FormattedTextControl(get_statusbar_right),
                 style="class:status.right",
-                width=10,
+                width=right_width,
                 align=WindowAlign.RIGHT,
             ),
         ],

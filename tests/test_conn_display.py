@@ -421,6 +421,17 @@ def _statusbar_joined(state):
     return ''.join(t for _, t in control.text())
 
 
+def _statusbar_right(state):
+    from rttt.ui import create_status_bar
+    control = create_status_bar(state).content.children[1].content
+    text = control.text()
+    if callable(text):
+        text = text()
+    if isinstance(text, str):
+        return text
+    return ''.join(part for _, part in text)
+
+
 def test_status_bar_shows_paused_and_f5_resume_when_paused():
     state = State()
     state.scroll_to_end = True
@@ -442,11 +453,14 @@ def test_status_bar_shows_toast_inline_keeping_paused():
     state.scroll_to_end = False
     state.message = 'Copied 27 chars — resumed'
     state.message_expires = time.monotonic() + 60
-    joined = _statusbar_joined(state)
-    assert 'PAUSED' in joined
-    assert 'Copied 27 chars — resumed' in joined
-    # Hints yield to the toast; F5 label is not required while toast is up.
-    assert 'Shift-drag' not in joined
+    left = _statusbar_joined(state)
+    right = _statusbar_right(state)
+    assert 'PAUSED' in left
+    # Left hints stay visible; toast replaces the clock on the right.
+    assert 'F5 Resume' in left
+    assert 'Shift-drag' in left
+    assert 'Copied 27 chars — resumed' in right
+    assert 'Copied' not in left
 
 
 def test_toast_does_not_change_pane_height():
@@ -595,3 +609,24 @@ def test_selection_key_filters_inactive_on_command():
         assert not b.filter(), f'{hit} filter active on Command'
         inactive += 1
     assert inactive >= 5, f'expected pane selection bindings, found {inactive}'
+
+
+def test_status_bar_toast_replaces_clock_on_the_right():
+    import time
+    state = State()
+    clock = _statusbar_right(state)
+    assert ':' in clock, 'expected HH:MM:SS clock'
+    assert 'Copied' not in clock
+
+    state.message = 'Pasted 12 chars'
+    state.message_expires = time.monotonic() + 60
+    toast = _statusbar_right(state)
+    assert 'Pasted 12 chars' in toast
+    # Left cheatsheet still present while toast is up.
+    left = _statusbar_joined(state)
+    assert 'F6 Mouse' in left
+    assert 'Ctrl-C Copy' in left
+
+    state.message = ''
+    state.message_expires = 0.0
+    assert ':' in _statusbar_right(state)
