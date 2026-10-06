@@ -210,6 +210,16 @@ class RtttPty:
         self.child.send(b'\x1b[15~')
         self.pump(0.35)
 
+    def press_shift_up(self, times: int = 1):
+        for _ in range(times):
+            self.child.send(b'\x1b[1;2A')
+            self.pump(0.08)
+        self.pump(0.25)
+
+    def press_ctrl_c(self):
+        self.child.send(b'\x03')
+        self.pump(0.45)
+
 
 @pytest.fixture
 def pty_app(tmp_path):
@@ -377,3 +387,22 @@ def test_right_click_without_selection_does_not_pause(pty_app):
     assert 'PAUSED' not in app.status()
     # May re-toast a prior copy from an earlier test fixture state — just no pause.
     _ = n  # keep prior count unused; toast path is fine
+
+
+def test_shift_up_extends_selection_then_ctrl_c_copies(pty_app):
+    """Shift-Up (CSI 1;2A) grows a keyboard selection; Ctrl-C copies it."""
+    app = pty_app
+    app.press_f5()  # stable coords + manual pause
+    assert 'PAUSED' in app.status()
+    logs = app.list_pane_lines('log', 'log')
+    assert len(logs) >= 3, logs
+    # Click near the bottom of the visible log so Shift-Up has room to grow.
+    r, c, sample = logs[-1]
+    app.plain_click(r, c + min(3, max(0, len(sample) - 1)))
+    n = len(app.osc_copies)
+    app.press_shift_up(3)
+    app.press_ctrl_c()
+    assert app.osc_copies[n:], 'Shift-Up + Ctrl-C copied nothing'
+    # Manual F5 pause must survive keyboard copy.
+    assert 'PAUSED' in app.status()
+    assert 'resumed' not in app.status()
