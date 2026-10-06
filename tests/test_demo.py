@@ -89,7 +89,7 @@ def test_cli_serial_demo_skips_jlink(monkeypatch, tmp_path):
     opened = []
 
     class FakeConsole:
-        def __init__(self, connector, history_file=None):
+        def __init__(self, connector, history_file=None, max_lines=None):
             self.connector = connector
             opened.append(connector)
 
@@ -120,7 +120,7 @@ def test_cli_demo_flag_alias(monkeypatch, tmp_path):
     opened = []
 
     class FakeConsole:
-        def __init__(self, connector, history_file=None):
+        def __init__(self, connector, history_file=None, max_lines=None):
             opened.append(connector)
 
         def run(self):

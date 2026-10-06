@@ -14,19 +14,30 @@ from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.selection import SelectionState, SelectionType
 from rttt.clipboard import HybridClipboard
-from rttt.ui import State, create_layout
+from rttt.ui import State, create_layout, OffsetNumberedMargin
 from rttt.utils import truncate_path
 from rttt.connectors.base import Connector
 from rttt.event import Event, EventType
 
+# Per-pane scrollback cap (Terminal and Log independently).
+DEFAULT_MAX_LINES = 10000
+# Trim when count exceeds max by this fraction, then drop back to max
+# so we amortize the O(n) string rebuild instead of trimming every line.
+TRIM_HYSTERESIS = 0.10
+
 
 class Console:
 
-    def __init__(self, connector: Connector, history_file=None):
+    def __init__(self, connector: Connector, history_file=None,
+                 max_lines=DEFAULT_MAX_LINES):
         self.connector = connector
         self.state = State()
         self.exception = None
         self._wire_reconnect()
+        # Cap lines kept in each pane; 0 disables trimming.
+        self.max_lines = max(0, int(max_lines or 0))
+        # Absolute line-number offset per buffer after oldest-line trims.
+        self._line_offset = {}  # Buffer -> int
         self._drag_buffer = None  # buffer under an in-progress mouse drag, if any
         # True when THIS drag flipped scroll_to_end off (pause deferred to MOVE).
         self._paused_for_drag = False
@@ -162,6 +173,8 @@ class Console:
         def _(event):
             self.terminal_buffer.set_document(Document(''), True)
             self.logger_buffer.set_document(Document(''), True)
+            self._line_offset[self.terminal_buffer] = 0
+            self._line_offset[self.logger_buffer] = 0
 
         @bindings.add("f3", eager=True)
         def _(event):
@@ -188,6 +201,8 @@ class Console:
         # mirror it to the system clipboard with toast feedback.
         self._install_select_to_copy(terminal_window)
         self._install_select_to_copy(logger_window)
+        self._install_offset_line_numbers(terminal_window)
+        self._install_offset_line_numbers(logger_window)
         # Right-click is separate from left-drag selection (must not pause,
         # start a selection, or steal pane focus). RMB on Log/Terminal copies;
         # RMB on the Command line pastes.
@@ -348,6 +363,101 @@ class Console:
                 pass
         return False  # false to keep the text in the buffer
 
+    def _install_offset_line_numbers(self, text_area):
+        """Replace the default NumberedMargin with absolute (post-trim) numbers."""
+        window = text_area.window
+        buf = text_area.buffer
+        self._line_offset.setdefault(buf, 0)
+
+        def get_offset(b=buf):
+            return self._line_offset.get(b, 0)
+
+        window.left_margins = [OffsetNumberedMargin(get_offset)]
+
+    def _window_for_buffer(self, buffer):
+        if buffer is self.logger_buffer:
+            return self.logger_window.window
+        if buffer is self.terminal_buffer:
+            return self.terminal_window.window
+        return None
+
+    def _trim_oldest_lines(self, buffer):
+        """Drop oldest lines when the pane exceeds max_lines (+ hysteresis).
+
+        Returns the number of characters removed from the start (0 if none).
+        Selection / cursor indices and the paused viewport scroll offset are
+        shifted so a paused view does not jump; line-number margin keeps an
+        absolute offset so numbers do not restart at 1.
+        """
+        max_lines = self.max_lines
+        if max_lines <= 0:
+            return 0
+        text = buffer.text
+        nlines = text.count('\n')
+        limit = int(max_lines * (1 + TRIM_HYSTERESIS))
+        if nlines <= limit:
+            return 0
+        drop = nlines - max_lines
+        if drop <= 0:
+            return 0
+        pos = 0
+        for _ in range(drop):
+            nxt = text.find('\n', pos)
+            if nxt < 0:
+                break
+            pos = nxt + 1
+        if pos <= 0:
+            return 0
+        removed_chars = pos
+        new_text = text[pos:]
+        self._line_offset[buffer] = self._line_offset.get(buffer, 0) + drop
+
+        # Shift sticky / in-progress selection and cursor.
+        sticky = self._selection_span
+        if sticky is not None and sticky[0] is buffer:
+            s, e = sticky[1] - removed_chars, sticky[2] - removed_chars
+            if e <= 0:
+                self._selection_span = None
+                buffer.exit_selection()
+            else:
+                self._selection_span = (buffer, max(0, s), max(0, e))
+
+        drag_sel_shift = None
+        if all((
+            getattr(self, '_drag_buffer', None) is buffer,
+            buffer.selection_state is not None,
+        )):
+            orig = buffer.selection_state.original_cursor_position - removed_chars
+            cur = buffer.cursor_position - removed_chars
+            stype = buffer.selection_state.type
+            if max(orig, cur) <= 0:
+                drag_sel_shift = None  # fully trimmed away
+            else:
+                drag_sel_shift = (max(0, orig), max(0, cur), stype)
+
+        # Keep paused viewport stable: content shifted up by `drop` lines.
+        window = self._window_for_buffer(buffer)
+        if window is not None and not self.state.scroll_to_end:
+            window.vertical_scroll = max(0, window.vertical_scroll - drop)
+
+        buffer._set_text(new_text)
+        # Caller always follows with _text_changed + selection restore; we
+        # only mutate text here. Return so insert path can restore.
+        buffer._text_changed()
+        if drag_sel_shift is not None:
+            orig, cur, stype = drag_sel_shift
+            buffer.selection_state = SelectionState(orig, stype)
+            buffer.cursor_position = min(cur, len(buffer.text))
+        elif sticky is not None and self._selection_span is not None and self._selection_span[0] is buffer:
+            self._apply_span(buffer, (self._selection_span[1], self._selection_span[2]))
+        elif self.state.scroll_to_end:
+            buffer.cursor_position = len(buffer.text)
+        else:
+            # Paused, no selection: keep cursor in range.
+            buffer.cursor_position = min(
+                max(0, buffer.cursor_position - removed_chars), len(buffer.text))
+        return removed_chars
+
     def _buffer_insert_text(self, buffer, line):
         # prompt_toolkit's Buffer._text_changed() always clears selection_state.
         # Re-apply our sticky exclusive-end span after append so highlights
@@ -379,6 +489,7 @@ class Console:
                 ])
                 if hi > lo:
                     span = (lo, hi)
+        # Single concatenation; trim amortizes rebuilds via hysteresis.
         changed = buffer._set_text(buffer.text + line)
         if changed:
             buffer._text_changed()
@@ -393,6 +504,8 @@ class Console:
                 pass  # between DOWN and first MOVE — no selection yet
             elif self.state.scroll_to_end:
                 buffer.cursor_position = len(buffer.text)
+            # Cap scrollback (may re-enter _text_changed + restore selection).
+            self._trim_oldest_lines(buffer)
 
     def _apply_span(self, buffer, span):
         start, end = span

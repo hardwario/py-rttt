@@ -21,6 +21,7 @@ This package is particularly useful for **debugging, logging, and real-time data
 - **Real-time communication** with embedded devices via RTT.
 - **Support for multiple RTT buffers** (console and logger).
 - **Adjustable latency** for optimized readout.
+- **Bounded scrollback** per pane (`--max-lines`, default 10000; also `max_lines:` in `.rttt.yaml`).
 - **J-Link support** with configurable serial numbers, device types, and speeds.
 - **Command-line interface (CLI)** for quick and easy access.
 - **Easy installation via PyPI**.
@@ -69,6 +70,8 @@ Options:
   --terminal-buffer INTEGER  RTT Terminal buffer index. [default: 0]
   --logger-buffer INTEGER    RTT Logger buffer index. [default: 1]
   --latency INTEGER          Latency for RTT readout in ms. [default: 50]
+  --max-lines N              Max lines kept per Terminal/Log pane;
+                             oldest trimmed in batches. [default: 10000]
   --history-file PATH        Path to history file. [default: ~/.rttt_history]
   --console-file PATH        Path to console file. [default: ~/.rttt_console]
   --mcp / --no-mcp           Enable MCP server. [default: no-mcp]
@@ -122,6 +125,10 @@ Demo commands (type into Command, then Enter):
 | `burst <n>` | Emit *n* lines immediately (selection stress) |
 | `disconnect` / `reconnect` | Simulate drop / re-attach |
 
+
+### Scrollback cap
+
+Each of the Terminal and Log panes keeps at most **`--max-lines`** lines (default **10000**, or `max_lines:` in `~/.rttt.yaml` / `.rttt.yaml`). When the count exceeds the limit by about 10%, the oldest lines are dropped in one batch back down to the limit (amortizes the string rebuild). Pause only stops auto-scroll — lines still append, and a paused viewport is shifted so it does not jump when oldest lines are trimmed. Line-number margins keep **absolute** numbers (an offset counter) so numbers do not restart at 1 after a trim. Set `--max-lines 0` to disable trimming.
 
 ### Clipboard (SSH / tmux)
 

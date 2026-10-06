@@ -156,9 +156,11 @@ def _run_headless(connector, mcp_listen):
 @click.option('--mcp-token', type=str, metavar='TOKEN', help='Require "Authorization: Bearer TOKEN" on the MCP server and upload endpoint.', default=None)
 @click.option('--substitutions/--no-substitutions', is_flag=True, default=True, show_default=True, help='Enable template substitutions in terminal input.')
 @click.option('--trust-shells', is_flag=True, default=False, help='Trust shell substitutions in config without interactive prompt (for CI/scripts).')
+@click.option('--max-lines', type=int, metavar='N', default=10000, show_default=True,
+              help='Max lines kept per Terminal/Log pane; oldest trimmed in batches.')
 @click.option('--headless', is_flag=True, default=False, help='Run without the interactive console, MCP server only (requires --mcp).')
 @click.pass_obj
-def cli(app: CliContext, serial, demo, device, speed, reset, flash_cmd, address, terminal_buffer, logger_buffer, latency, auto_reconnect, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, headless):
+def cli(app: CliContext, serial, demo, device, speed, reset, flash_cmd, address, terminal_buffer, logger_buffer, latency, auto_reconnect, history_file, console_file, mcp, mcp_listen, mcp_token, substitutions, trust_shells, max_lines, headless):
     '''HARDWARIO Real Time Transfer Terminal Console.'''
 
     if headless and not mcp:
@@ -179,7 +181,7 @@ def cli(app: CliContext, serial, demo, device, speed, reset, flash_cmd, address,
             _run_headless(connector, mcp_listen)
             return
         _prepare_tty_for_console()
-        console = Console(connector, history_file=history_file)
+        console = Console(connector, history_file=history_file, max_lines=max_lines)
         console.run()
         return
 
@@ -246,7 +248,7 @@ def cli(app: CliContext, serial, demo, device, speed, reset, flash_cmd, address,
         return
 
     _prepare_tty_for_console()
-    console = Console(connector, history_file=history_file)
+    console = Console(connector, history_file=history_file, max_lines=max_lines)
     console.run()
 
 
