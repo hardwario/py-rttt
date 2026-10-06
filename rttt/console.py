@@ -39,6 +39,8 @@ class Console:
         self._last_copied = ''
         # Exclusive-end span (start, end) we re-apply after streaming appends.
         self._selection_span = None  # tuple[Buffer, int, int] | None
+        # True after mouse-up / copy inclusive bump so we do not double-bump.
+        self._selection_inclusive = False
 
         if history_file:
             d = os.path.dirname(history_file)
@@ -407,6 +409,18 @@ class Console:
         buffer.cursor_position = end
         self._selection_span = (buffer, start, end)
 
+    def _ensure_selection_inclusive(self, buffer):
+        """Bump an emacs-exclusive selection so copy matches the highlight.
+
+        The block cursor sits on a cell that looks selected but is past the
+        exclusive end. Apply the same +1 as mouse-up unless already bumped.
+        """
+        if buffer.selection_state is None:
+            return
+        if self._selection_inclusive:
+            return
+        self._make_mouse_selection_inclusive(buffer)
+
     def _make_mouse_selection_inclusive(self, buffer):
         """Include the character under the mouse release (GUI-like).
 
@@ -429,6 +443,7 @@ class Console:
         else:
             ss.original_cursor_position = new_hi
         self._selection_span = (buffer, lo, new_hi)
+        self._selection_inclusive = True
 
     def _selected_text(self, buffer):
         """Text covered by the current (or sticky) selection.
@@ -514,6 +529,7 @@ class Console:
         self._drag_buffer = buf
         self._paused_for_drag = False
         self._drag_was_scrolling = self.state.scroll_to_end
+        self._selection_inclusive = False
         try:
             if self.app is not None:
                 self.app.layout.current_control = control
@@ -814,6 +830,7 @@ class Console:
         if buffer.selection_state is None:
             buffer.start_selection()
             self._clear_other_pane_selection(buffer)
+            self._selection_inclusive = False
 
         if direction == 'left':
             buffer.cursor_position = max(0, buffer.cursor_position - count)
@@ -853,6 +870,7 @@ class Console:
             return
         if self.state.scroll_to_end:
             self._pause_auto_scroll_for_selection(toast=True)
+        self._selection_inclusive = False
         buffer.cursor_position = 0
         buffer.start_selection()
         buffer.cursor_position = len(buffer.text)
@@ -876,6 +894,10 @@ class Console:
         Shared by Ctrl-C and right-click so both honour the same auto/manual
         rules. Manual F5 pause is never lifted.
         """
+        if buffer is not None and buffer.selection_state is not None:
+            # Match the highlighted range (include the cell under the cursor),
+            # same inclusive adjustment mouse-up applies before copy.
+            self._ensure_selection_inclusive(buffer)
         had_selection = bool(buffer is not None and self._selected_text(buffer))
         was_auto = self._pause_origin == 'auto'
         if was_auto and had_selection:
