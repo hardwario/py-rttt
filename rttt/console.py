@@ -66,81 +66,54 @@ class Console:
                 self.app.invalidate()
 
         def _pane_focused():
+            # Require a pane focus and exclude Command so eager Ctrl-A / Shift
+            # bindings never swallow editing keys when focus just moved.
+            if self.has_focus(self.input_field):
+                return False
             return self.has_focus(terminal_window) or self.has_focus(logger_window)
 
         pane_focused = Condition(_pane_focused)
 
-        def _extend_selection(move):
-            """Grow the selection in the focused read-only pane by one cursor move.
+        def _command_focused():
+            return self.has_focus(self.input_field)
 
-            Auto-pauses scroll on the first extension while streaming (same
-            origin as a mouse drag) so lines do not jump under the highlight.
-            """
-            buffer = None
-            for window in (terminal_window, logger_window):
-                if self.has_focus(window):
-                    buffer = window.buffer
-                    break
-            if buffer is None:
-                return
-            offset = move(buffer)
-            if not offset:
-                return
-            if buffer.selection_state is None:
-                buffer.start_selection()
-                self._clear_other_pane_selection(buffer)
-            buffer.cursor_position += offset
-            ss = buffer.selection_state
-            if ss is not None:
-                lo, hi = sorted([ss.original_cursor_position, buffer.cursor_position])
-                if hi > lo:
-                    self._selection_span = (buffer, lo, hi)
-            if self.state.scroll_to_end:
-                self._pause_auto_scroll_for_selection(toast=True)
+        command_focused = Condition(_command_focused)
 
         @bindings.add("s-left", filter=pane_focused, eager=True)
         def _(event):
-            _extend_selection(lambda b: -1 if b.cursor_position else 0)
+            self._keyboard_extend('left', count=getattr(event, 'arg', 1) or 1)
 
         @bindings.add("s-right", filter=pane_focused, eager=True)
         def _(event):
-            _extend_selection(lambda b: 1 if b.cursor_position < len(b.text) else 0)
+            self._keyboard_extend('right', count=getattr(event, 'arg', 1) or 1)
 
         @bindings.add("s-up", filter=pane_focused, eager=True)
         def _(event):
-            _extend_selection(lambda b: b.document.get_cursor_up_position())
+            self._keyboard_extend('up', count=getattr(event, 'arg', 1) or 1)
 
         @bindings.add("s-down", filter=pane_focused, eager=True)
         def _(event):
-            _extend_selection(lambda b: b.document.get_cursor_down_position())
+            self._keyboard_extend('down', count=getattr(event, 'arg', 1) or 1)
 
         @bindings.add("s-home", filter=pane_focused, eager=True)
         def _(event):
-            _extend_selection(
-                lambda b: -len(b.document.current_line_before_cursor))
+            self._keyboard_extend('home')
 
         @bindings.add("s-end", filter=pane_focused, eager=True)
         def _(event):
-            _extend_selection(
-                lambda b: len(b.document.current_line_after_cursor))
+            self._keyboard_extend('end')
+
+        @bindings.add("s-pageup", filter=pane_focused, eager=True)
+        def _(event):
+            self._keyboard_extend('pageup', count=getattr(event, 'arg', 1) or 1)
+
+        @bindings.add("s-pagedown", filter=pane_focused, eager=True)
+        def _(event):
+            self._keyboard_extend('pagedown', count=getattr(event, 'arg', 1) or 1)
 
         @bindings.add("c-a", filter=pane_focused, eager=True)
         def _(event):
-            buffer = None
-            for window in (terminal_window, logger_window):
-                if self.has_focus(window):
-                    buffer = window.buffer
-                    break
-            if buffer is None:
-                return
-            buffer.cursor_position = 0
-            buffer.start_selection()
-            buffer.cursor_position = len(buffer.text)
-            self._clear_other_pane_selection(buffer)
-            if buffer.text:
-                self._selection_span = (buffer, 0, len(buffer.text))
-            if self.state.scroll_to_end:
-                self._pause_auto_scroll_for_selection(toast=True)
+            self._keyboard_select_all()
 
         def _escape_clears_selection():
             if self._pause_origin == 'auto':
@@ -154,12 +127,16 @@ class Console:
 
         @bindings.add("escape", filter=Condition(_escape_clears_selection), eager=True)
         def _(event):
-            # Drop the highlight; auto-pause from selection resumes (manual F5 stays).
-            self._selection_span = None
-            for buf in (self.terminal_buffer, self.logger_buffer):
-                buf.exit_selection()
-            if self._pause_origin == 'auto':
-                self._resume_streaming_after_copy()
+            self._clear_pane_selection_on_escape()
+
+        # Vi page-navigation binds Ctrl-U to half-page scroll; keep unix-line
+        # discard on the Command line (readline-style).
+        @bindings.add("c-u", filter=command_focused, eager=True)
+        def _(event):
+            # Readline unix-line-discard: kill from start of line to the cursor.
+            buff = self.input_field.buffer
+            if buff.cursor_position:
+                buff.delete_before_cursor(count=buff.cursor_position)
 
         @bindings.add("f4", eager=True)
         def _(event):
@@ -479,13 +456,15 @@ class Console:
     def _pause_auto_scroll_for_selection(self, toast=True):
         """Same effect as F5 Pause: freeze scroll-to-end while selecting.
 
-        Called on the first real drag MOVE (not plain click). Streaming
-        OUT/LOG keeps appending, but the viewport no longer jumps.
-        Origin is set to 'auto' so MOUSE_UP can resume after a successful copy.
+        Called on the first real drag MOVE (not plain click) or keyboard
+        extend. Streaming OUT/LOG keeps appending, but the viewport no longer
+        jumps. Origin is set to 'auto' so copy / Esc can resume afterwards.
 
-        Returns True when this call flipped scroll_to_end off. toast=False
-        avoids invalidate() racing an in-progress drag.
+        Never overrides a manual F5 pause. Returns True when this call flipped
+        scroll_to_end off. toast=False avoids invalidate() racing a drag.
         """
+        if self._pause_origin == 'manual':
+            return False
         if not self.state.scroll_to_end:
             return False
         self.state.scroll_to_end = False
@@ -495,7 +474,12 @@ class Console:
         return True
 
     def _resume_streaming_after_copy(self):
-        """Undo an auto-pause: scroll again and drop the highlight (text is copied)."""
+        """Undo an auto-pause: scroll again and drop the highlight (text is copied).
+
+        Manual F5 pause is never lifted here — callers must check origin.
+        """
+        if self._pause_origin == 'manual':
+            return
         self.state.scroll_to_end = True
         self._pause_origin = None
         self._selection_span = None
@@ -604,12 +588,12 @@ class Console:
         control.mouse_handler = mouse_handler
 
     def _right_click_copy_pane(self, buffer):
-        """Right-click on Log/Terminal: copy that pane's selection (Ctrl-C path).
+        """Right-click on Log/Terminal: same copy/resume rules as Ctrl-C.
 
-        Does not change focus or pause state. No selection → same as Ctrl-C:
-        re-toast ``_last_copied``, or ``Nothing selected``.
+        Auto-pause resumes with ``— resumed``; manual F5 stays paused.
+        Does not change focus. No selection → re-toast ``_last_copied``.
         """
-        return self._copy_from_buffer(buffer, clear_selection=True)
+        return self._copy_pane_with_optional_resume(buffer)
 
     def _install_right_click_paste(self, text_area):
         """Right-click on the Command line focuses it and pastes clipboard text."""
@@ -684,26 +668,143 @@ class Console:
         self.state.show_message(f'Pasted {n} char{"s" if n != 1 else ""}')
         return True
 
-    def _ctrl_c_copy(self):
-        """Ctrl-C / Ctrl-Insert: copy focused pane, resume if auto-paused.
+    def _focused_pane_buffer(self):
+        """Read-only pane buffer holding the focus, or None."""
+        return self._focused_copy_buffer()
 
-        Matches mouse select-to-copy: a live selection that auto-paused scroll
-        resumes after a successful copy (`Copied N chars — resumed`). Manual
-        F5 pause stays. No selection → re-toast ``_last_copied``.
+    def _sync_selection_span(self, buffer):
+        ss = buffer.selection_state
+        if ss is None:
+            if self._selection_span is not None and self._selection_span[0] is buffer:
+                self._selection_span = None
+            return
+        lo, hi = sorted([ss.original_cursor_position, buffer.cursor_position])
+        if hi > lo:
+            self._selection_span = (buffer, lo, hi)
+        elif self._selection_span is not None and self._selection_span[0] is buffer:
+            self._selection_span = None
+
+    def _pane_window_for_buffer(self, buffer):
+        if buffer is self.terminal_buffer:
+            return self.terminal_window
+        if buffer is self.logger_buffer:
+            return self.logger_window
+        return None
+
+    def _page_row_count(self, buffer):
+        """Visible rows for PageUp/Down selection, falling back to 10."""
+        window = self._pane_window_for_buffer(buffer)
+        if window is None:
+            return 10
+        win = getattr(window, 'window', None)
+        info = getattr(win, 'render_info', None) if win is not None else None
+        if info is not None and getattr(info, 'window_height', None):
+            return max(1, int(info.window_height) - 1)
+        return 10
+
+    def _keyboard_extend(self, direction, count=1):
+        """Grow the selection in the focused pane (Shift+arrows / page).
+
+        Pauses scroll before moving (same auto origin as a mouse drag) so a
+        streaming append cannot snap the cursor back mid-gesture. Uses
+        Buffer.cursor_up/down so preferred_column is preserved across lines.
         """
-        buf = self._focused_copy_buffer()
-        if all((
-            buf is not None,
-            self._pause_origin == 'auto',
-            self._selected_text(buf),
-        )):
-            if self._copy_from_buffer(buf, clear_selection=False):
+        buffer = self._focused_pane_buffer()
+        if buffer is None:
+            return
+        count = max(1, int(count or 1))
+
+        # Freeze streaming first — never overrides a manual F5 pause.
+        if self.state.scroll_to_end:
+            self._pause_auto_scroll_for_selection(toast=True)
+
+        before = buffer.cursor_position
+        if buffer.selection_state is None:
+            buffer.start_selection()
+            self._clear_other_pane_selection(buffer)
+
+        if direction == 'left':
+            buffer.cursor_position = max(0, buffer.cursor_position - count)
+        elif direction == 'right':
+            buffer.cursor_position = min(len(buffer.text), buffer.cursor_position + count)
+        elif direction == 'up':
+            buffer.cursor_up(count=count)
+        elif direction == 'down':
+            buffer.cursor_down(count=count)
+        elif direction == 'home':
+            buffer.cursor_position += buffer.document.get_start_of_line_position(
+                after_whitespace=False)
+        elif direction == 'end':
+            buffer.cursor_position += buffer.document.get_end_of_line_position()
+        elif direction == 'pageup':
+            buffer.cursor_up(count=count * self._page_row_count(buffer))
+        elif direction == 'pagedown':
+            buffer.cursor_down(count=count * self._page_row_count(buffer))
+        else:
+            return
+
+        if buffer.cursor_position == before:
+            # No movement (e.g. Shift+Up on the first line) — drop an empty mark
+            # so Ctrl-C does not look broken.
+            ss = buffer.selection_state
+            if ss is not None and ss.original_cursor_position == before:
+                buffer.exit_selection()
+                if self._selection_span is not None and self._selection_span[0] is buffer:
+                    self._selection_span = None
+            return
+
+        self._sync_selection_span(buffer)
+
+    def _keyboard_select_all(self):
+        buffer = self._focused_pane_buffer()
+        if buffer is None:
+            return
+        if self.state.scroll_to_end:
+            self._pause_auto_scroll_for_selection(toast=True)
+        buffer.cursor_position = 0
+        buffer.start_selection()
+        buffer.cursor_position = len(buffer.text)
+        self._clear_other_pane_selection(buffer)
+        if buffer.text:
+            self._selection_span = (buffer, 0, len(buffer.text))
+        else:
+            buffer.exit_selection()
+
+    def _clear_pane_selection_on_escape(self):
+        """Esc: drop highlight; resume only an automatic selection pause."""
+        self._selection_span = None
+        for buf in (self.terminal_buffer, self.logger_buffer):
+            buf.exit_selection()
+        if self._pause_origin == 'auto':
+            self._resume_streaming_after_copy()
+
+    def _copy_pane_with_optional_resume(self, buffer):
+        """Copy one pane; resume when the pause was automatic and text was selected.
+
+        Shared by Ctrl-C and right-click so both honour the same auto/manual
+        rules. Manual F5 pause is never lifted.
+        """
+        had_selection = bool(buffer is not None and self._selected_text(buffer))
+        was_auto = self._pause_origin == 'auto'
+        if was_auto and had_selection:
+            if self._copy_from_buffer(buffer, clear_selection=False):
                 n = len(self._last_copied)
                 self._resume_streaming_after_copy()
                 self.state.show_message(
                     f'Copied {n} char{"s" if n != 1 else ""} — resumed')
-            return
-        self._copy_from_buffer(buf, clear_selection=bool(buf))
+                return True
+            return False
+        # Manual pause: keep sticky highlight (same as mouse select-to-copy).
+        keep_sticky = all((
+            buffer is not None,
+            self._pause_origin == 'manual',
+            had_selection,
+        ))
+        return self._copy_from_buffer(buffer, clear_selection=not keep_sticky)
+
+    def _ctrl_c_copy(self):
+        """Ctrl-C / Ctrl-Insert: copy focused pane (shared resume rules)."""
+        self._copy_pane_with_optional_resume(self._focused_copy_buffer())
 
     def _copy_from_buffer(self, buffer, clear_selection=True):
         """Copy the current selection (or last copy) to the hybrid clipboard.

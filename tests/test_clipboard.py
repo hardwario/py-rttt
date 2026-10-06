@@ -1060,3 +1060,169 @@ def test_keyboard_move_that_goes_nowhere_marks_nothing():
     _binding(console, 'shiftdown')(None)
     assert buf.selection_state is None
     assert console._selection_span is None
+
+
+def test_shift_up_and_down_extend_selection_by_lines():
+    from prompt_toolkit.document import Document
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    text = 'line one\nline two\nline three\n'
+    buf.set_document(Document(text), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    buf.cursor_position = len(text)
+
+    _binding(console, 'shiftup')(None)
+    assert 'line three' in console._selected_text(buf)
+    assert console._pause_origin == 'auto'
+
+    _binding(console, 'shiftup')(None)
+    selected = console._selected_text(buf)
+    assert 'line two' in selected and 'line three' in selected
+
+
+def test_shift_up_via_xfce_escape_sequence():
+    """xfce4-terminal sends CSI 1;2A for Shift-Up — PTK must extend selection."""
+    import asyncio
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+
+    async def main():
+        with create_pipe_input() as inp:
+            app = Application(
+                layout=console.app.layout,
+                key_bindings=console.app.key_bindings,
+                mouse_support=True,
+                full_screen=True,
+                clipboard=console.app.clipboard,
+                input=inp,
+                output=DummyOutput(),
+            )
+            console.app = app
+            console.state.set_app(app)
+            buf = console.logger_buffer
+            buf.set_document(
+                Document('line one\nline two\nline three\n'), bypass_readonly=True)
+            app.layout.focus(console.logger_window)
+            buf.cursor_position = len(buf.text)
+
+            async def probe():
+                await asyncio.sleep(0.1)
+                inp.send_text('\x1b[1;2A')  # Shift-Up
+                await asyncio.sleep(0.15)
+                assert console._selected_text(buf), 'Shift-Up did not extend'
+                assert 'line three' in console._selected_text(buf)
+                inp.send_text('\x1b[1;2B')  # Shift-Down
+                await asyncio.sleep(0.15)
+                app.exit()
+
+            app.create_background_task(probe())
+            await app.run_async()
+
+    asyncio.run(main())
+
+
+def test_manual_f5_ctrl_c_then_escape_stays_paused():
+    """F5 manual + select + Ctrl-C + Esc must never resume streaming."""
+    from prompt_toolkit.document import Document
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.terminal_buffer
+    buf.set_document(Document('abcdef'), bypass_readonly=True)
+    console.app.layout.focus(console.terminal_window)
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    buf.cursor_position = 0
+    _binding(console, 'shiftright')(None)
+    _binding(console, 'shiftright')(None)
+    assert console._pause_origin == 'manual'
+    assert console._pause_auto_scroll_for_selection() is False
+
+    console._ctrl_c_copy()
+    assert console._pause_origin == 'manual'
+    assert console.state.scroll_to_end is False
+    assert 'resumed' not in console.state.message
+
+    _binding(console, 'escape')(None)
+    assert console._pause_origin == 'manual'
+    assert console.state.scroll_to_end is False
+    assert buf.selection_state is None
+
+
+def test_right_click_resumes_after_auto_keyboard_pause():
+    from prompt_toolkit.document import Document
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    buf.set_document(Document('hello world'), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    buf.cursor_position = 0
+    _binding(console, 'shiftright')(None)
+    _binding(console, 'shiftright')(None)
+    assert console._pause_origin == 'auto'
+
+    console._right_click_copy_pane(buf)
+    assert 'resumed' in console.state.message
+    assert console.state.scroll_to_end is True
+    assert console._pause_origin is None
+
+
+def test_right_click_keeps_manual_pause():
+    from prompt_toolkit.document import Document
+    from rttt.clipboard import HybridClipboard
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.clipboard = HybridClipboard(emit=lambda s: None, use_pyperclip=False)
+    buf = console.logger_buffer
+    buf.set_document(Document('hello world'), bypass_readonly=True)
+    console.app.layout.focus(console.logger_window)
+    console.state.scroll_to_end = False
+    console._pause_origin = 'manual'
+    buf.cursor_position = 0
+    _binding(console, 'shiftright')(None)
+    _binding(console, 'shiftright')(None)
+
+    console._right_click_copy_pane(buf)
+    assert 'resumed' not in console.state.message
+    assert console.state.scroll_to_end is False
+    assert console._pause_origin == 'manual'
+
+
+def test_ctrl_u_clears_command_line_not_stolen_by_page_nav():
+    from prompt_toolkit.document import Document
+    from rttt.connectors.demo import DemoConnector
+    from rttt.console import Console
+    from tests.test_conn_display import _binding
+
+    console = Console(DemoConnector(delay=10), history_file=None)
+    console.app.layout.focus(console.input_field)
+    buf = console.input_field.buffer
+    buf.set_document(Document('kill me', cursor_position=7), True)
+    handler = _binding(console, 'controlu')
+    assert handler is not None, 'Ctrl-U is not bound for Command'
+    handler(None)
+    assert buf.text == ''
