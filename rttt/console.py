@@ -38,6 +38,8 @@ class Console:
         self.max_lines = max(0, int(max_lines or 0))
         # Absolute line-number offset per buffer after oldest-line trims.
         self._line_offset = {}  # Buffer -> int
+        # Screen geometry of each pane content area (updated on render).
+        self._pane_geom = {}  # Buffer -> dict
         self._drag_buffer = None  # buffer under an in-progress mouse drag, if any
         # True when THIS drag flipped scroll_to_end off (pause deferred to MOVE).
         self._paused_for_drag = False
@@ -241,6 +243,7 @@ class Console:
         )
 
         self.state.set_app(self.app)
+        self._enable_root_drag_capture()
 
     def run(self):
         async def event_task():
@@ -681,6 +684,12 @@ class Console:
                 screen, mouse_handlers, write_position,
                 parent_style, erase_bg, z_index)
             info = window.render_info
+            try:
+                left_w0 = sum(
+                    window._get_margin_width(m) for m in (window.left_margins or []))
+            except Exception:
+                left_w0 = 0
+            self._record_pane_geometry(text_area, write_position, left_w0)
             if info is None or not window.left_margins:
                 return result
             try:
@@ -718,9 +727,222 @@ class Console:
                 y_max=write_position.ypos + write_position.height,
                 handler=gutter_mouse,
             )
+            self._record_pane_geometry(text_area, write_position, left_w)
             return result
 
         window.write_to_screen = write_to_screen
+
+    def _control_for_buffer(self, buffer):
+        if buffer is self.logger_buffer:
+            return self.logger_window.control
+        if buffer is self.terminal_buffer:
+            return self.terminal_window.control
+        return None
+
+    def _record_pane_geometry(self, text_area, write_position, left_w):
+        """Remember where the pane sits on screen for drag edge-scroll."""
+        buf = text_area.buffer
+        self._pane_geom[buf] = {
+            'xpos': write_position.xpos,
+            'ypos': write_position.ypos,
+            'width': write_position.width,
+            'height': write_position.height,
+            'left_w': left_w,
+            'text_area': text_area,
+        }
+
+    def _enable_root_drag_capture(self):
+        root = self.app.layout.container
+        if getattr(root, '_rttt_drag_capture', False):
+            return
+        orig = root.write_to_screen
+
+        def write_to_screen(screen, mouse_handlers, write_position,
+                            parent_style, erase_bg, z_index):
+            result = orig(
+                screen, mouse_handlers, write_position,
+                parent_style, erase_bg, z_index)
+            # While dragging, capture only the fringe OUTSIDE the drag pane so
+            # in-pane MOVE/UP keep BufferControl's native coordinates. Without
+            # this, release above/below the pane never extends a multi-screen
+            # selection (PTK routes those events to frame/status/other windows).
+            if self._drag_buffer is not None:
+                geom = self._pane_geom.get(self._drag_buffer)
+                if geom is not None:
+                    def capture(mouse_event):
+                        return self._drag_capture_mouse(mouse_event)
+                    x0 = write_position.xpos
+                    x1 = write_position.xpos + write_position.width
+                    y0 = write_position.ypos
+                    y1 = write_position.ypos + write_position.height
+                    gx0 = geom['xpos']
+                    gy0 = geom['ypos']
+                    gx1 = geom['xpos'] + geom['width']
+                    gy1 = geom['ypos'] + geom['height']
+                    # Top band
+                    if gy0 > y0:
+                        mouse_handlers.set_mouse_handler_for_range(
+                            x_min=x0, x_max=x1, y_min=y0, y_max=gy0,
+                            handler=capture)
+                    # Bottom band
+                    if gy1 < y1:
+                        mouse_handlers.set_mouse_handler_for_range(
+                            x_min=x0, x_max=x1, y_min=gy1, y_max=y1,
+                            handler=capture)
+                    # Left band (beside pane)
+                    if gx0 > x0:
+                        mouse_handlers.set_mouse_handler_for_range(
+                            x_min=x0, x_max=gx0, y_min=gy0, y_max=gy1,
+                            handler=capture)
+                    # Right band
+                    if gx1 < x1:
+                        mouse_handlers.set_mouse_handler_for_range(
+                            x_min=gx1, x_max=x1, y_min=gy0, y_max=gy1,
+                            handler=capture)
+            return result
+
+        root.write_to_screen = write_to_screen
+        root._rttt_drag_capture = True
+
+    def _drag_capture_mouse(self, mouse_event):
+        """Handle mouse while a drag or live selection is active."""
+        try:
+            return self._drag_capture_mouse_inner(mouse_event)
+        except Exception:
+            logger.exception('drag capture mouse')
+            return None
+
+    def _drag_capture_mouse_inner(self, mouse_event):
+        """Handle mouse while a drag or live selection is active."""
+        buf = self._drag_buffer
+        if buf is None:
+            # Wheel with sticky/live selection: scroll the focused pane.
+            if mouse_event.event_type in (
+                    MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+                return self._wheel_during_selection(mouse_event)
+            return NotImplemented
+
+        geom = self._pane_geom.get(buf)
+        control = self._control_for_buffer(buf)
+        if geom is None or control is None:
+            return NotImplemented
+
+        y = mouse_event.position.y
+        top = geom['ypos']
+        bottom = geom['ypos'] + geom['height'] - 1
+
+        # Wheel always scrolls the drag pane and keeps the selection anchor.
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            return self._drag_scroll_and_extend(buf, direction=-1)
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            return self._drag_scroll_and_extend(buf, direction=1)
+
+        # Outside the pane: scroll + extend only (do not invent extreme
+        # BufferControl coords — those crash the lexer/line lookup).
+        if y < top:
+            self._drag_scroll_and_extend(buf, direction=-1)
+            if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                self._finish_drag_on_mouse_up(buf)
+            return None
+        if y > bottom:
+            self._drag_scroll_and_extend(buf, direction=1)
+            if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                self._finish_drag_on_mouse_up(buf)
+            return None
+
+        # Fallback: event landed in capture but coords look inside — treat as
+        # edge scroll toward the nearer vertical edge, then finish on UP.
+        mid = (top + bottom) / 2
+        self._drag_scroll_and_extend(
+            buf, direction=-1 if y < mid else 1)
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            self._finish_drag_on_mouse_up(buf)
+        return None
+
+    def _drag_scroll_and_extend(self, buffer, direction):
+        """Scroll one line and move the selection cursor to the new edge."""
+        window = self._window_for_buffer(buffer)
+        if window is None:
+            return NotImplemented
+        info = window.render_info
+        if info is None:
+            return NotImplemented
+        # Adjust vertical_scroll directly — Window._scroll_* may also move the
+        # cursor via content.move_cursor_up/down, which fights the selection.
+        if direction < 0:
+            if window.vertical_scroll > 0:
+                window.vertical_scroll -= 1
+        else:
+            max_scroll = max(0, info.content_height - info.window_height)
+            if window.vertical_scroll < max_scroll:
+                window.vertical_scroll += 1
+        line_count = buffer.document.line_count
+        if line_count <= 0:
+            return None
+        # Derive visible line from vertical_scroll (render_info may be stale
+        # until the next paint after we change the scroll offset).
+        height = info.window_height or 1
+        first = max(0, min(window.vertical_scroll, line_count - 1))
+        last = max(0, min(first + height - 1, line_count - 1))
+        if buffer.selection_state is None:
+            buffer.start_selection(selection_type=SelectionType.CHARACTERS)
+        if direction < 0:
+            index = buffer.document.translate_row_col_to_index(first, 0)
+        else:
+            index = buffer.document.translate_row_col_to_index(last, 10 ** 6)
+        buffer.cursor_position = max(0, min(index, len(buffer.text)))
+        return None
+
+    def _wheel_during_selection(self, mouse_event):
+        """Mouse wheel with an active selection: scroll that pane, keep anchor."""
+        buf = None
+        if self._selection_span is not None:
+            buf = self._selection_span[0]
+        if buf is None:
+            for candidate in (self.logger_buffer, self.terminal_buffer):
+                if candidate.selection_state is not None:
+                    buf = candidate
+                    break
+        if buf is None:
+            return NotImplemented
+        direction = -1 if mouse_event.event_type == MouseEventType.SCROLL_UP else 1
+        # Preserve sticky span across scroll (window scroll does not change text).
+        return self._drag_scroll_and_extend(buf, direction)
+
+    def _finish_drag_on_mouse_up(self, buf):
+        """Complete a select-to-copy drag (shared by pane handler and capture)."""
+        self._drag_buffer = None
+        auto_paused = self._paused_for_drag
+        self._paused_for_drag = False
+        copied = False
+        if buf.selection_state is not None:
+            self._make_mouse_selection_inclusive(buf)
+            if self._selected_text(buf):
+                copied = bool(
+                    self._copy_from_buffer(buf, clear_selection=False))
+            else:
+                buf.exit_selection()
+                span = self._selection_span
+                if span is not None and span[0] is buf:
+                    self._selection_span = None
+        else:
+            buf.exit_selection()
+            span = self._selection_span
+            if span is not None and span[0] is buf:
+                self._selection_span = None
+
+        if copied and self._pause_origin == 'auto':
+            n = len(self._last_copied)
+            self._resume_streaming_after_copy()
+            self.state.show_message(
+                f'Copied {n} char{"s" if n != 1 else ""} — resumed')
+        elif copied and self.state.scroll_to_end:
+            self._selection_span = None
+            buf.exit_selection()
+            buf.cursor_position = len(buf.text)
+        elif not copied and auto_paused:
+            self._resume_streaming_after_copy()
+        return copied
 
     def _install_select_to_copy(self, text_area):
         control = text_area.control
@@ -739,6 +961,21 @@ class Console:
                 if mouse_event.event_type == MouseEventType.MOUSE_UP:
                     self._right_click_copy_pane(buf)
                 return None
+
+            # Wheel during an active selection: scroll this pane, keep anchor.
+            if mouse_event.event_type in (
+                    MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+                span = self._selection_span
+                sticky_here = span is not None and span[0] is buf
+                if any((
+                    buf.selection_state is not None,
+                    sticky_here,
+                    self._drag_buffer is buf,
+                )):
+                    direction = (
+                        -1 if mouse_event.event_type == MouseEventType.SCROLL_UP
+                        else 1)
+                    return self._drag_scroll_and_extend(buf, direction)
 
             # Missed MOUSE_DOWN (gutter press before the bridge, or any path
             # that delivers MOVE with a button held first): seed the drag and
@@ -761,7 +998,12 @@ class Console:
             if mouse_event.event_type == MouseEventType.MOUSE_DOWN:
                 self._seed_drag(buf, control)
 
-            result = original(mouse_event)
+            result = None
+            try:
+                result = original(mouse_event)
+            except Exception:
+                # Out-of-range drag coords (edge capture) must not skip copy.
+                logger.exception('buffer mouse_handler')
 
             if all((
                 mouse_event.event_type == MouseEventType.MOUSE_MOVE,
@@ -775,44 +1017,7 @@ class Console:
                     toast=False)
 
             if mouse_event.event_type == MouseEventType.MOUSE_UP:
-                self._drag_buffer = None
-                auto_paused = self._paused_for_drag
-                self._paused_for_drag = False
-                copied = False
-                if buf.selection_state is not None:
-                    self._make_mouse_selection_inclusive(buf)
-                    if self._selected_text(buf):
-                        copied = bool(
-                            self._copy_from_buffer(buf, clear_selection=False))
-                    else:
-                        buf.exit_selection()
-                        span = self._selection_span
-                        if span is not None and span[0] is buf:
-                            self._selection_span = None
-                else:
-                    buf.exit_selection()
-                    span = self._selection_span
-                    if span is not None and span[0] is buf:
-                        self._selection_span = None
-
-                if copied and self._pause_origin == 'auto':
-                    # Streaming was on before the drag — restore it; text is
-                    # already on the clipboard (Ctrl-C re-toasts via _last_copied).
-                    n = len(self._last_copied)
-                    self._resume_streaming_after_copy()
-                    self.state.show_message(
-                        f'Copied {n} char{"s" if n != 1 else ""} — resumed')
-                elif copied and self.state.scroll_to_end:
-                    # Copied without an auto-pause (should be rare). A sticky
-                    # highlight would pin the viewport while follow is on —
-                    # clear it so the pane keeps streaming.
-                    self._selection_span = None
-                    buf.exit_selection()
-                    buf.cursor_position = len(buf.text)
-                elif not copied and auto_paused:
-                    # Aborted drag that had auto-paused — do not leave Pause on.
-                    self._resume_streaming_after_copy()
-                # Manual F5 pause: stay paused; sticky highlight kept on copy.
+                self._finish_drag_on_mouse_up(buf)
             return result
 
         control.mouse_handler = mouse_handler

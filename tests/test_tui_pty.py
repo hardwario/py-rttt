@@ -427,3 +427,21 @@ def test_gutter_press_drag_copies_from_press_line(pty_app):
     assert b[2] in text, text
     # Must not be a huge tail from the scroll tip.
     assert text.count('\n') < 15, text
+
+def test_drag_past_pane_edge_extends_selection(pty_app):
+    """Drag from mid-pane down past the pane — selection still grows/copies."""
+    app = pty_app
+    app.press_f5()
+    assert 'PAUSED' in app.status()
+    logs = app.list_pane_lines('log', 'log')
+    assert len(logs) >= 3, logs
+    a = logs[0]
+    n = len(app.osc_copies)
+    # Start on first visible log line text; drag below the log pane into the
+    # status / frame fringe so edge-scroll capture extends the selection.
+    r0, c0 = a[0], a[1]
+    app.drag(r0, c0, min(app.rows - 1, r0 + 20), c0 + 8, steps=10, settle=0.8)
+    assert app.osc_copies[n:], 'edge-scroll drag copied nothing'
+    text = app.osc_copies[n]
+    assert text.startswith(a[2]) or a[2] in text, text
+    assert text.count('\n') >= 1, text
