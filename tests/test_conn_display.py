@@ -407,3 +407,313 @@ def test_the_conn_overlay_returns_once_flashing_ends():
     state.flash_visible = False
     assert state.show_conn_overlay(), \
         'the disconnect went unreported once the flash overlay closed'
+
+
+def test_mouse_starts_on():
+    # Clicking a pane to focus it and dragging to select is the expected way to
+    # copy out of the console, so it works without finding a key first.
+    state = State()
+    assert state.mouse_enabled is True
+
+
+def test_f6_toggles_the_mouse():
+    console, _ = _console_with_leaf()
+    handler = _binding(console, 'f6')
+    assert handler is not None, 'F6 is not bound'
+
+    assert console.state.mouse_enabled is True
+    handler(None)
+    assert console.state.mouse_enabled is False, 'F6 did not turn the mouse off'
+    handler(None)
+    assert console.state.mouse_enabled is True, 'F6 did not turn it back on'
+
+
+def test_mouse_support_follows_the_toggle():
+    console, _ = _console_with_leaf()
+    support = console.app.mouse_support
+
+    assert support(), 'mouse reporting off by default'
+    console.state.mouse_enabled = False
+    assert not support(), 'F6 did not reach the application'
+
+
+def test_mouse_support_still_forced_on_for_the_overlay():
+    # The Connection dialog's buttons have to be clickable whatever the toggle
+    # says, or a user who never found F6 cannot press them.
+    console, _ = _console_with_leaf()
+    console.state.mouse_enabled = False        # user turned it off
+    console.state.set_conn('rtt', 'disconnected', 'gone')
+    assert console.app.mouse_support(), 'overlay buttons were left unclickable'
+
+
+def test_status_bar_shows_the_mouse_state():
+    from rttt.ui import create_status_bar
+
+    def mouse_style(state):
+        control = create_status_bar(state).content.children[0].content
+        for style, text in control.text():
+            if 'F6' in text:
+                return style
+        return None
+
+    state = State()
+    on = mouse_style(state)
+    assert on is not None, 'nothing tells the user the toggle exists'
+
+    state.mouse_enabled = False
+    # Highlighted while OFF, since on is the normal state -- same as F5 Pause.
+    assert mouse_style(state) != on, \
+        'the bar looks the same whether the mouse is on or off'
+
+
+def test_right_button_release_is_recognised():
+    from rttt.console import _is_right_button_release as is_right
+
+    # SGR release of the right button, with and without modifiers.
+    assert is_right('\x1b[<2;5;3m')
+    assert is_right('\x1b[<6;5;3m'), 'shift held still means right button'
+    assert is_right('\x1b[<18;5;3m'), 'ctrl held still means right button'
+    # Typical encoding acts on the press, having no per-button release.
+    assert is_right('\x1b[M' + chr(32 + 2) + chr(40) + chr(40))
+
+
+def test_other_mouse_events_are_left_alone():
+    from rttt.console import _is_right_button_release as is_right
+
+    assert not is_right('\x1b[<2;5;3M'), 'acted on the press as well as release'
+    assert not is_right('\x1b[<0;5;3m'), 'left button treated as right'
+    assert not is_right('\x1b[<1;5;3m'), 'middle button treated as right'
+    assert not is_right('\x1b[<64;5;3M'), 'scroll treated as a right click'
+    assert not is_right('\x1b[<35;5;3m'), 'plain motion treated as a click'
+    assert not is_right('')
+    assert not is_right('\x1b[A'), 'an arrow key parsed as a mouse event'
+
+
+def test_right_click_copies_a_selection():
+    console, _ = _console_with_leaf()
+    console.terminal_buffer.set_document(__import__(
+        'prompt_toolkit.document', fromlist=['Document']).Document('hello world'), True)
+    console.app.layout.focus(console.terminal_buffer)
+
+    buffer = console.terminal_buffer
+    buffer.cursor_position = 0
+    buffer.start_selection()
+    buffer.cursor_position = 5
+
+    copied = {}
+    console.app.clipboard.set_data = lambda data: copied.setdefault('text', data.text)
+
+    assert console._copy_selection() is True
+    assert copied.get('text') == 'hello'
+
+
+def test_right_click_with_no_selection_pastes_into_the_command_line():
+    from prompt_toolkit.clipboard import ClipboardData
+
+    console, _ = _console_with_leaf()
+    console.app.clipboard.set_data(ClipboardData('rtc set'))
+
+    assert console._copy_selection() is False, 'copied without a selection'
+    assert console._paste_into_input() is True
+    assert 'rtc set' in console.input_field.buffer.text
+
+
+def test_selection_keys_mark_text_in_a_read_only_pane():
+    # prompt_toolkit binds none of these itself, so without them there is no way
+    # to select in a read-only pane and Ctrl-C has nothing to copy.
+    from prompt_toolkit.document import Document
+
+    console, _ = _console_with_leaf()
+    console.terminal_buffer.set_document(Document('abcdef'), True)
+    console.app.layout.focus(console.terminal_buffer)
+    console.terminal_buffer.cursor_position = 0
+
+    handler = _binding(console, 'shiftright')
+    assert handler is not None, 'Shift-Right is not bound'
+    handler(None)
+    handler(None)
+
+    buffer = console.terminal_buffer
+    assert buffer.selection_state is not None, 'nothing was selected'
+    assert buffer.copy_selection().text == 'ab'
+
+
+def test_ctrl_a_selects_the_whole_pane():
+    from prompt_toolkit.document import Document
+
+    console, _ = _console_with_leaf()
+    console.logger_buffer.set_document(Document('line one\nline two'), True)
+    console.app.layout.focus(console.logger_buffer)
+
+    handler = _binding(console, 'controla')
+    assert handler is not None, 'Ctrl-A is not bound'
+    handler(None)
+
+    assert console.logger_buffer.copy_selection().text == 'line one\nline two'
+
+
+def test_selection_works_from_the_end_of_the_pane():
+    # Following output keeps the cursor at the very end, so Shift-Down and
+    # Shift-Right have nowhere to go and used to mark an empty selection --
+    # Ctrl-C then copied nothing, which read as copying being broken.
+    from prompt_toolkit.document import Document
+
+    console, _ = _console_with_leaf()
+    text = 'line one\nline two\nline three\n'
+    console.logger_buffer.set_document(Document(text), True)
+    console.app.layout.focus(console.logger_buffer)
+    console.logger_buffer.cursor_position = len(text)
+
+    handler = _binding(console, 'shiftup')
+    assert handler is not None
+    handler(None)
+
+    selected = console.logger_buffer.copy_selection().text
+    assert selected, 'selecting up from the end of the pane copied nothing'
+
+
+def test_a_move_that_goes_nowhere_marks_nothing():
+    from prompt_toolkit.document import Document
+
+    console, _ = _console_with_leaf()
+    console.logger_buffer.set_document(Document('one line'), True)
+    console.app.layout.focus(console.logger_buffer)
+    console.logger_buffer.cursor_position = len('one line')
+
+    # Down from the last line cannot move, so there is nothing to select.
+    _binding(console, 'shiftdown')(None)
+    assert console.logger_buffer.selection_state is None, \
+        'marked an empty selection, so Ctrl-C had nothing to copy'
+
+
+def test_a_right_click_packet_reaches_the_paste():
+    # End to end through the key processor, the way a terminal delivers it.
+    import asyncio as _asyncio
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.clipboard import ClipboardData
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.layout import Layout
+    from prompt_toolkit.output import DummyOutput
+
+    console, _ = _console_with_leaf()
+
+    async def main():
+        with create_pipe_input() as inp:
+            app = Application(layout=console.app.layout,
+                              key_bindings=console.app.key_bindings,
+                              mouse_support=True, full_screen=True,
+                              clipboard=console.app.clipboard,
+                              input=inp, output=DummyOutput())
+            console.app = app
+            console.state.set_app(app)
+            app.clipboard.set_data(ClipboardData('rtc set'))
+
+            async def probe():
+                await _asyncio.sleep(0.15)
+                inp.send_text('\x1b[<2;5;3m')
+                await _asyncio.sleep(0.2)
+                app.exit()
+
+            app.create_background_task(probe())
+            await app.run_async()
+
+    _asyncio.run(main())
+    assert 'rtc set' in console.input_field.buffer.text, \
+        'a right click with no selection did not paste'
+
+
+def _drag(app, inp, press='\x1b[<0;10;3M', move='\x1b[<32;30;5M',
+          release='\x1b[<0;30;5m'):
+    """Send a left-button drag as a terminal would, after a real render."""
+    import asyncio as _asyncio
+
+    async def steps():
+        await _asyncio.sleep(0.1)
+        app.renderer.render(app, app.layout)
+        await _asyncio.sleep(0.05)
+        for packet in (press, move, release):
+            inp.send_text(packet)
+            await _asyncio.sleep(0.1)
+        app.exit()
+
+    return steps
+
+
+def test_clicking_a_pane_focuses_it_and_pauses():
+    # Clicking into a pane means working in it. Following output would move the
+    # text out from under a selection while it is being made, so a click also
+    # pauses -- the same state F5 leaves, and F5 resumes.
+    import asyncio as _asyncio
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    console, _ = _console_with_leaf()
+    console.logger_buffer.set_document(
+        Document('\n'.join(f'log line {i}' for i in range(20))), True)
+    assert console.state.scroll_to_end is True
+
+    async def main():
+        with create_pipe_input() as inp:
+            app = Application(layout=console.app.layout,
+                              key_bindings=console.app.key_bindings,
+                              mouse_support=True, full_screen=True,
+                              clipboard=console.app.clipboard,
+                              input=inp, output=DummyOutput())
+            console.app = app
+            console.state.set_app(app)
+
+            async def probe():
+                await _asyncio.sleep(0.1)
+                app.renderer.render(app, app.layout)
+                await _asyncio.sleep(0.05)
+                inp.send_text('\x1b[<0;10;3M')      # left press in a pane
+                await _asyncio.sleep(0.1)
+                inp.send_text('\x1b[<0;10;3m')      # release
+                await _asyncio.sleep(0.15)
+                app.exit()
+
+            app.create_background_task(probe())
+            await app.run_async()
+
+    _asyncio.run(main())
+
+    assert console.has_focus(console.terminal_buffer) or \
+        console.has_focus(console.logger_buffer), 'the click did not focus a pane'
+    assert console.state.scroll_to_end is False, \
+        'clicking a pane left it scrolling, so a selection cannot be held'
+
+
+def test_a_click_outside_the_panes_does_not_pause():
+    # The status bar and the command line are not places a selection is made.
+    import asyncio as _asyncio
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    console, _ = _console_with_leaf()
+
+    async def main():
+        with create_pipe_input() as inp:
+            app = Application(layout=console.app.layout,
+                              key_bindings=console.app.key_bindings,
+                              mouse_support=True, full_screen=True,
+                              clipboard=console.app.clipboard,
+                              input=inp, output=DummyOutput())
+            console.app = app
+            console.state.set_app(app)
+
+            async def probe():
+                await _asyncio.sleep(0.1)
+                app.renderer.render(app, app.layout)
+                await _asyncio.sleep(0.05)
+                inp.send_text('\x1b[<0;5;40M')      # status bar row
+                await _asyncio.sleep(0.15)
+                app.exit()
+
+            app.create_background_task(probe())
+            await app.run_async()
+
+    _asyncio.run(main())
+    assert console.state.scroll_to_end is True, 'a click off the panes paused it'

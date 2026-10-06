@@ -27,6 +27,11 @@ class State:
         # transport source -> {'status': ..., 'error': ...}, from CONN events
         self.conn = {}
         self.auto_reconnect = False
+        # Mouse reporting is on: clicking a pane focuses it, dragging selects,
+        # right click copies. F6 turns it off to hand click-and-drag back to the
+        # terminal emulator, whose own selection is the way to copy across both
+        # panes or out of a session without a working clipboard.
+        self.mouse_enabled = True
         # Set by Console so the dialog can reach the connector that owns the
         # transport; no-ops when the connector does not support reconnecting.
         self.on_reconnect = None
@@ -35,6 +40,10 @@ class State:
 
     def is_show_status_bar(self):
         return self.show_status_bar
+
+    def toggle_mouse(self):
+        self.mouse_enabled = not self.mouse_enabled
+        return self.mouse_enabled
 
     # How a transport is named to the user; anything else falls back to its id.
     CONN_LABELS = {'rtt': 'Device'}
@@ -197,6 +206,7 @@ def create_status_bar(state):
             ('class:title', ' <F3> Focus '),
             ('class:title', ' <F4> Reconnect '),
             ('class:title', ' <F5> Pause ') if state.scroll_to_end else ('class:yellow', ' <F5> Pause '),
+            ('class:title', ' <F6> Mouse ') if state.mouse_enabled else ('class:yellow', ' <F6> Mouse OFF '),
             ('class:title', ' <F8> Clear '),
             ('class:title', ' <F10> Exit (or Ctrl-<F10>) '),
             ('class:title', ' [Shift-]<Tab> Cycle '),
