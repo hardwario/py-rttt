@@ -183,18 +183,27 @@ class State:
 
 
 class OffsetNumberedMargin(NumberedMargin):
-    """Line numbers that stay absolute after oldest-line trimming.
+    """Line numbers that stay absolute after oldest-line trimming / filtering.
 
     ``get_offset`` returns how many lines have been dropped from the start of
-    the buffer; displayed numbers are ``lineno + 1 + offset``.
+    the buffer; the default display is ``lineno + 1 + offset``.
+
+    ``get_line_number(lineno)``, when set, overrides that (used by the filtered
+    Log view so each visible row keeps its original absolute number).
     """
 
-    def __init__(self, get_offset: Callable[[], int], **kwargs):
+    def __init__(self, get_offset: Callable[[], int],
+                 get_line_number: Callable[[int], int] | None = None, **kwargs):
         super().__init__(**kwargs)
         self.get_offset = get_offset
+        self.get_line_number = get_line_number
 
     def get_width(self, get_ui_content):
-        line_count = get_ui_content().line_count + max(0, self.get_offset())
+        ui = get_ui_content()
+        if self.get_line_number is not None and ui.line_count > 0:
+            last = self.get_line_number(ui.line_count - 1)
+            return max(3, len(f"{max(1, last)}") + 1)
+        line_count = ui.line_count + max(0, self.get_offset())
         return max(3, len(f"{line_count}") + 1)
 
     def create_margin(self, window_render_info, width: int, height: int) -> StyleAndTextTuples:
@@ -209,7 +218,10 @@ class OffsetNumberedMargin(NumberedMargin):
         for y, lineno in enumerate(window_render_info.displayed_lines):
             if lineno != last_lineno:
                 if lineno is not None:
-                    display = lineno + 1 + offset
+                    if self.get_line_number is not None:
+                        display = self.get_line_number(lineno)
+                    else:
+                        display = lineno + 1 + offset
                     if lineno == current_lineno:
                         if relative:
                             result.append((style_current, "%i" % display))
