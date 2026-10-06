@@ -44,7 +44,7 @@ class State:
         # Ephemeral status toast (copy feedback, etc.); cleared by expiry or task.
         self.message = ''
         self.message_expires = 0.0
-        # Lines appended to either pane while paused (combined); for badge.
+        # Lines appended to either pane while paused (combined); Log pause badge.
         self.paused_appended = 0
         # Log filter expression (None/'' = show all); status shows FILTER: …
         self.log_filter = ''
@@ -295,26 +295,40 @@ def create_logger_window():
     return logger_window, logger_search
 
 
+def create_log_pause_badge(state):
+    """PAUSED +N strip on the bottom edge of the Log pane (not the status bar).
+
+    Combined Terminal+Log append count since pause. Hidden while scrolling.
+    """
+    def get_text():
+        n = state.paused_appended
+        label = f' PAUSED +{n} ' if n else ' PAUSED '
+        return [('class:paused', label)]
+
+    return ConditionalContainer(
+        content=Window(
+            FormattedTextControl(get_text),
+            height=LayoutDimension.exact(1),
+            style='class:paused',
+        ),
+        filter=Condition(lambda: not state.scroll_to_end),
+    )
+
+
 def create_status_bar(state):
     """
     Create the status bar for the console.
 
-    Pause state and ephemeral toasts live in this single row so pane heights
-    never jump when a message appears (a separate toast strip pushed both
-    panes up one line and made drag hit the wrong line).
+    Ephemeral toasts live in this single row so pane heights never jump when
+    a message appears (a separate toast strip pushed both panes up one line
+    and made drag hit the wrong line).
 
     Toasts replace the clock on the right; left-side hints stay visible.
+    The PAUSED +N badge sits on the Log pane bottom edge instead.
     """
     def get_statusbar_text():
         paused = not state.scroll_to_end
         items = [('class:title', ' RTTT ')]
-        if paused:
-            # Distinct reverse/yellow segment — visible on every pause path
-            # (F5, auto-pause on drag move, stays until resume). Combined
-            # count of Terminal+Log lines appended since pause (not per-pane).
-            n = state.paused_appended
-            label = f' PAUSED +{n} ' if n else ' PAUSED '
-            items.append(('class:paused', label))
 
         # Keep hints short so Copy / Shift-drag stay visible around 80–100 cols.
         # Hints stay up while a toast is showing on the right (replacing clock).
@@ -402,10 +416,12 @@ def create_layout(state, history_file):
         content=filter_field,
         filter=Condition(lambda: state.filter_editing or bool(state.log_filter)),
     )
+    pause_badge = create_log_pause_badge(state)
     hs_logger = HSplit([
         logger_window,
         logger_search,
         filter_bar,
+        pause_badge,
     ])
 
     flash_bar = ProgressBar()

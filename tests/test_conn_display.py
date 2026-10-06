@@ -432,7 +432,8 @@ def _statusbar_right(state):
     return ''.join(part for _, part in text)
 
 
-def test_status_bar_shows_paused_and_f5_resume_when_paused():
+def test_status_bar_shows_f5_resume_when_paused():
+    """PAUSED badge lives on the Log pane; status bar only flips F5 hint."""
     state = State()
     state.scroll_to_end = True
     running = _statusbar_joined(state)
@@ -442,12 +443,26 @@ def test_status_bar_shows_paused_and_f5_resume_when_paused():
 
     state.scroll_to_end = False
     paused = _statusbar_joined(state)
-    assert 'PAUSED' in paused
+    assert 'PAUSED' not in paused
     assert 'F5 Resume' in paused
     assert 'F5 Pause' not in paused
 
 
-def test_status_bar_shows_toast_inline_keeping_paused():
+def test_log_pause_badge_shows_when_paused():
+    from rttt.ui import create_log_pause_badge
+    state = State()
+    state.scroll_to_end = True
+    state.paused_appended = 0
+    badge = create_log_pause_badge(state)
+    assert not badge.filter()
+    state.scroll_to_end = False
+    state.paused_appended = 4
+    assert badge.filter()
+    parts = badge.content.content.text()
+    assert any('PAUSED +4' in text for _style, text in parts)
+
+
+def test_status_bar_shows_toast_inline_while_paused():
     import time
     state = State()
     state.scroll_to_end = False
@@ -455,7 +470,7 @@ def test_status_bar_shows_toast_inline_keeping_paused():
     state.message_expires = time.monotonic() + 60
     left = _statusbar_joined(state)
     right = _statusbar_right(state)
-    assert 'PAUSED' in left
+    assert 'PAUSED' not in left
     # Left hints stay visible; toast replaces the clock on the right.
     assert 'F5 Resume' in left
     assert 'Shift-drag' in left
