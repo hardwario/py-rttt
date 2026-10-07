@@ -469,7 +469,7 @@ def test_status_bar_keeps_clock_while_toast_float_is_up():
     import time
     state = State()
     state.scroll_to_end = False
-    state.message = 'Copied 27 chars — resumed'
+    state.message = 'Copied 27 chars'
     state.message_expires = time.monotonic() + 60
     left = _statusbar_joined(state)
     right = _statusbar_right(state)
@@ -515,7 +515,7 @@ def test_toast_does_not_change_pane_height():
                 # Also confirm the layout has no dedicated toast strip sibling.
                 assert len(root.content.children) == 4
 
-                state.message = 'Copied 10 chars — resumed'
+                state.message = 'Copied 10 chars'
                 state.message_expires = time.monotonic() + 60
                 app.invalidate()
                 await _asyncio.sleep(0.05)

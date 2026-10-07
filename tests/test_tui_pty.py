@@ -257,7 +257,8 @@ def test_first_drag_in_log_copies_from_press_to_release(pty_app):
     assert text.startswith('log 4'), text
     assert 'log 8' in text, text
     assert 'term' not in text, text
-    assert 'resumed' in app.toast_area()
+    assert 'Copied' in app.toast_area()
+    assert 'resumed' not in app.toast_area()
     assert not app.paused_visible()
 
 
@@ -319,7 +320,8 @@ def test_auto_pause_copy_resumes_scrolling(pty_app):
     app.drag(a[0], a[1], b[0], b[1] + len(b[2]) - 1)
     assert app.osc_copies[n:]
     toast = app.toast_area()
-    assert 'resumed' in toast, toast
+    assert 'Copied' in toast, toast
+    assert 'resumed' not in toast, toast
     assert 'PAUSED' not in ''.join(app.rows_text()), toast
 
 

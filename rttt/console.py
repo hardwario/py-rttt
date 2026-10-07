@@ -1448,10 +1448,8 @@ class Console:
                 self._selection_span = None
 
         if copied and self._pause_origin == 'auto':
-            n = len(self._last_copied)
+            # Toast already set by _copy_from_buffer; resume is silent.
             self._resume_streaming_after_copy()
-            self.state.show_message(
-                f'Copied {n} char{"s" if n != 1 else ""} — resumed')
         elif copied and self.state.scroll_to_end:
             self._selection_span = None
             buf.exit_selection()
@@ -1546,7 +1544,7 @@ class Console:
     def _right_click_copy_pane(self, buffer):
         """Right-click on Log/Terminal: same copy/resume rules as Ctrl-C.
 
-        Auto-pause resumes with ``— resumed``; manual F5 stays paused.
+        Auto-pause resumes silently; manual F5 stays paused.
         Does not change focus. No selection → re-toast ``_last_copied``.
         """
         return self._copy_pane_with_optional_resume(buffer)
@@ -1760,10 +1758,8 @@ class Console:
         was_auto = self._pause_origin == 'auto'
         if was_auto and had_selection:
             if self._copy_from_buffer(buffer, clear_selection=False):
-                n = len(self._last_copied)
+                # Toast already set by _copy_from_buffer; resume is silent.
                 self._resume_streaming_after_copy()
-                self.state.show_message(
-                    f'Copied {n} char{"s" if n != 1 else ""} — resumed')
                 return True
             return False
         # Manual pause: keep sticky highlight (same as mouse select-to-copy).
