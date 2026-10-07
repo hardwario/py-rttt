@@ -124,6 +124,15 @@ class RtttPty:
     def status(self) -> str:
         return self.rows_text()[self.rows - 1]
 
+    def toast_area(self) -> str:
+        """Text in the floating-toast band just above the status bar.
+
+        The herdr-style Float is height 3 with bottom=1, so it occupies the
+        three rows above the status line (clock stays on the status row).
+        """
+        rows = self.rows_text()
+        return ''.join(rows[max(0, self.rows - 5): self.rows - 1])
+
     def paused_visible(self) -> bool:
         """True when the Log-pane PAUSED badge is on screen."""
         return any('PAUSED' in row for row in self.rows_text())
@@ -248,7 +257,7 @@ def test_first_drag_in_log_copies_from_press_to_release(pty_app):
     assert text.startswith('log 4'), text
     assert 'log 8' in text, text
     assert 'term' not in text, text
-    assert 'resumed' in app.status()
+    assert 'resumed' in app.toast_area()
     assert not app.paused_visible()
 
 
@@ -309,9 +318,9 @@ def test_auto_pause_copy_resumes_scrolling(pty_app):
     a, b = logs[0], logs[2]
     app.drag(a[0], a[1], b[0], b[1] + len(b[2]) - 1)
     assert app.osc_copies[n:]
-    st = app.status()
-    assert 'resumed' in st, st
-    assert 'PAUSED' not in ''.join(app.rows_text()), st
+    toast = app.toast_area()
+    assert 'resumed' in toast, toast
+    assert 'PAUSED' not in ''.join(app.rows_text()), toast
 
 
 def test_manual_f5_drag_stays_paused(pty_app):
@@ -324,9 +333,10 @@ def test_manual_f5_drag_stays_paused(pty_app):
     a, b = logs[0], logs[2]
     app.drag(a[0], a[1], b[0], b[1] + len(b[2]) - 1)
     assert app.osc_copies[n:], 'expected a copy while manually paused'
-    st = app.status()
-    assert 'PAUSED' in ''.join(app.rows_text()), st
-    assert 'resumed' not in st, st
+    toast = app.toast_area()
+    assert 'PAUSED' in ''.join(app.rows_text()), toast
+    assert 'resumed' not in toast, toast
+    assert 'resumed' not in app.status()
 
 
 def test_plain_click_does_not_copy_or_pause(pty_app):
@@ -374,8 +384,8 @@ def test_right_click_copies_after_left_drag(pty_app):
     n = len(app.osc_copies)
     app.right_click(a[0], a[1] + 1)
     # Either a fresh OSC 52 write, or at least a Copied toast (re-toast path).
-    st = app.status()
-    assert 'Copied' in st or app.osc_copies[n:], (st, app.osc_copies[n:])
+    toast = app.toast_area()
+    assert 'Copied' in toast or app.osc_copies[n:], (toast, app.osc_copies[n:])
     assert app.paused_visible(), 'right-click must not resume'
     if app.osc_copies[n:]:
         assert a[2] in app.osc_copies[n] or first == app.osc_copies[n]
@@ -409,6 +419,7 @@ def test_shift_up_extends_selection_then_ctrl_c_copies(pty_app):
     assert app.osc_copies[n:], 'Shift-Up + Ctrl-C copied nothing'
     # Manual F5 pause must survive keyboard copy.
     assert app.paused_visible()
+    assert 'resumed' not in app.toast_area()
     assert 'resumed' not in app.status()
 
 def test_gutter_press_drag_copies_from_press_line(pty_app):

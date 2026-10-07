@@ -95,7 +95,9 @@ def test_conn_overlay_visible_only_while_down():
 
     state = State()
     root, _, _, _, _ = create_layout(state, None)
+    # floats = [toast, flash, conn]; conn is last and uses show_conn_overlay.
     overlay = root.floats[-1].content
+    assert overlay.filter.func == state.show_conn_overlay
     assert not overlay.filter()
 
     state.set_conn('rtt', 'disconnected', 'boom')
@@ -462,7 +464,8 @@ def test_log_pause_badge_shows_when_paused():
     assert any('PAUSED +4' in text for _style, text in parts)
 
 
-def test_status_bar_shows_toast_inline_while_paused():
+def test_status_bar_keeps_clock_while_toast_float_is_up():
+    """Toast floats above the bar; status bar hints + clock stay put."""
     import time
     state = State()
     state.scroll_to_end = False
@@ -471,11 +474,11 @@ def test_status_bar_shows_toast_inline_while_paused():
     left = _statusbar_joined(state)
     right = _statusbar_right(state)
     assert 'PAUSED' not in left
-    # Left hints stay visible; toast replaces the clock on the right.
     assert 'F5 Resume' in left
     assert 'Mouse drag - copy' in left
-    assert 'Copied 27 chars — resumed' in right
     assert 'Copied' not in left
+    assert 'Copied' not in right
+    assert ':' in right, 'clock must stay while toast float is visible'
 
 
 def test_toast_does_not_change_pane_height():
@@ -550,27 +553,61 @@ def test_status_bar_has_no_f6_mouse_hint():
     assert 'F5 Pause' in left
 
 
-def test_toast_badge_uses_herdr_style_fragments():
-    """Clipboard toast is a green-border / check badge, not plain text."""
+def _toast_float(root):
+    from prompt_toolkit.layout.containers import Float
+    matches = [f for f in root.floats if isinstance(f, Float) and f.bottom == 1 and f.right == 1]
+    assert len(matches) == 1, 'expected one bottom-right toast Float'
+    return matches[0]
+
+
+def _toast_float_body_text(toast_float):
+    """Read FormattedTextControl text from the Frame body (middle row)."""
+    from prompt_toolkit.layout.containers import DynamicContainer, VSplit
+
+    hsplit = toast_float.content.content
+    mid = next(c for c in hsplit.children if isinstance(c, VSplit) and any(
+        isinstance(ch, DynamicContainer) for ch in c.children
+    ))
+    dyn = next(ch for ch in mid.children if isinstance(ch, DynamicContainer))
+    control = dyn.get_container().content
+    body = control.text()
+    if callable(body):
+        body = body()
+    return ''.join(t for _, t in body)
+
+
+def test_toast_overlay_uses_herdr_style_float():
+    """Clipboard toast is a bottom-right Float with green check, not status-bar pipes."""
     import time
-    from rttt.ui import format_toast_fragments
+    from prompt_toolkit.layout.containers import ConditionalContainer
+    from rttt.ui import create_layout, format_toast_fragments
 
     parts = format_toast_fragments('Copied 12 chars')
     joined = ''.join(t for _, t in parts)
     assert '✓' in joined
     assert 'Copied 12 chars' in joined
+    assert '│' not in joined, 'pipe badge chrome belongs to the Frame, not fragments'
     styles = [s for s, _ in parts]
-    assert any('toast.border' in s for s in styles)
     assert any('toast.icon' in s for s in styles)
     assert any('toast.text' in s for s in styles)
 
     state = State()
     state.message = 'Copied 12 chars'
     state.message_expires = time.monotonic() + 60
+    # Clock stays in the status bar (no pipe toast there).
     right = _statusbar_right(state)
-    assert '✓' in right
-    assert 'Copied 12 chars' in right
-    assert '│' in right
+    assert ':' in right
+    assert 'Copied' not in right
+    assert '│' not in right
+
+    root, *_ = create_layout(state, None)
+    toast_float = _toast_float(root)
+    assert toast_float.height == 3
+    assert isinstance(toast_float.content, ConditionalContainer)
+    assert toast_float.content.filter()
+    body_text = _toast_float_body_text(toast_float)
+    assert '✓' in body_text
+    assert 'Copied 12 chars' in body_text
 
 
 def test_selection_keys_mark_text_in_a_read_only_pane():
@@ -622,8 +659,10 @@ def test_selection_key_filters_inactive_on_command():
     assert inactive >= 5, f'expected pane selection bindings, found {inactive}'
 
 
-def test_status_bar_toast_replaces_clock_on_the_right():
+def test_status_bar_clock_stays_while_toast_float_is_up():
     import time
+    from rttt.ui import create_layout
+
     state = State()
     clock = _statusbar_right(state)
     assert ':' in clock, 'expected HH:MM:SS clock'
@@ -631,14 +670,20 @@ def test_status_bar_toast_replaces_clock_on_the_right():
 
     state.message = 'Pasted 12 chars'
     state.message_expires = time.monotonic() + 60
-    toast = _statusbar_right(state)
-    assert 'Pasted 12 chars' in toast
-    # Left cheatsheet still present while toast is up.
+    # Status-bar right stays the clock; toast lives in the float.
+    assert ':' in _statusbar_right(state)
+    assert 'Pasted' not in _statusbar_right(state)
     left = _statusbar_joined(state)
     assert 'F7 Filter' in left
     assert 'Ctrl-C Copy' in left
     assert 'F6' not in left
 
+    root, *_ = create_layout(state, None)
+    toast_float = _toast_float(root)
+    assert toast_float.content.filter()
+    assert toast_float.width() >= len('Pasted 12 chars') + 4
+
     state.message = ''
     state.message_expires = 0.0
     assert ':' in _statusbar_right(state)
+    assert not toast_float.content.filter()
