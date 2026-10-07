@@ -47,7 +47,7 @@ class State:
         self.filter_editing = False
 
     def show_message(self, text, seconds=2.0):
-        """Show an ephemeral toast on the right of the status bar (replaces clock)."""
+        """Show an ephemeral floating toast (bottom-right, above the status bar)."""
         self.message = text or ''
         self.message_expires = time.monotonic() + seconds if text else 0.0
         if not self.app:
@@ -319,29 +319,59 @@ def create_log_pause_badge(state):
 
 
 def format_toast_fragments(toast):
-    """Herdr-style clipboard toast: green border, dark panel, green check.
-
-    Renders in the status-bar right slot (replacing the clock) as a compact
-    one-line badge so pane heights never jump.
-    """
+    """Inner line of the herdr-style floating toast (green check + text)."""
     return [
-        ('class:toast.border', '│'),
-        ('class:toast.icon', ' ✓ '),
+        ('class:toast.icon', '✓ '),
         ('class:toast.text', toast),
-        ('class:toast.border', ' │'),
     ]
+
+
+def create_toast_overlay(state):
+    """Small herdr-style toast float: dark panel, green border, bottom-right.
+
+    Sits above the status bar (bottom=1) so the clock stays visible. Height is
+    three rows (box border + content); width tracks the message like herdr.
+    """
+    def body_fragments():
+        msg = state.current_message()
+        if not msg:
+            return []
+        return format_toast_fragments(msg)
+
+    def overlay_width():
+        # Match herdr copy-feedback: len(message) + 4 (borders + "✓ ").
+        msg = state.current_message() or ''
+        return min(max(len(msg) + 4, 12), 56)
+
+    panel = Frame(
+        body=Window(
+            FormattedTextControl(body_fragments),
+            height=LayoutDimension.exact(1),
+            style='class:toast',
+        ),
+        style='class:toast',
+    )
+
+    return Float(
+        content=ConditionalContainer(
+            content=panel,
+            filter=Condition(lambda: bool(state.current_message())),
+        ),
+        right=1,
+        bottom=1,
+        width=overlay_width,
+        height=3,
+        z_index=5,
+    )
 
 
 def create_status_bar(state):
     """
     Create the status bar for the console.
 
-    Ephemeral toasts live in this single row so pane heights never jump when
-    a message appears (a separate toast strip pushed both panes up one line
-    and made drag hit the wrong line).
-
-    Toasts replace the clock on the right as a herdr-style badge (green
-    border, dark panel, green check); left-side hints stay visible.
+    The clock stays on the right always. Ephemeral copy/paste feedback is a
+    floating overlay above this bar (see create_toast_overlay), so pane
+    heights never jump and the cheatsheet is never replaced by pipe badges.
     The PAUSED +N badge sits on the Log pane bottom edge instead.
     """
     def get_statusbar_text():
@@ -349,7 +379,6 @@ def create_status_bar(state):
         items = [('class:title', ' RTTT ')]
 
         # Keep hints short so Copy / Mouse drag stay visible around 80–100 cols.
-        # Hints stay up while a toast is showing on the right (replacing clock).
         f5_style = 'class:yellow' if paused else 'class:title'
         f5_label = ' F5 Resume ' if paused else ' F5 Pause '
         if state.log_filter:
@@ -369,18 +398,9 @@ def create_status_bar(state):
         return items
 
     def get_statusbar_right():
-        toast = state.current_message()
-        if toast:
-            # Herdr-style compact badge: green border, dark panel, green check.
-            return format_toast_fragments(toast)
         return datetime.now().strftime('%H:%M:%S')
 
     def right_width():
-        toast = state.current_message()
-        if toast:
-            # Cap so a long hint cannot crush the left cheatsheet entirely.
-            # +6 for "│ ✓ " … " │" border/icon chrome around the message.
-            return LayoutDimension.exact(min(max(len(toast) + 6, 12), 56))
         return LayoutDimension.exact(10)
 
     return ConditionalContainer(
@@ -549,12 +569,10 @@ def create_layout(state, history_file):
                     content=hs_logger,
                     filter=Condition(state.is_show_logger)
                 ),
-                # Toast is rendered inside the status bar (see create_status_bar)
-                # so this row must not appear — it used to shift both panes up.
                 status_bar
             ]
         ),
-        floats=[flash_overlay, conn_overlay],
+        floats=[create_toast_overlay(state), flash_overlay, conn_overlay],
         style="bg:#111111 fg:#eeeeee",
     )
 
