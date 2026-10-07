@@ -32,10 +32,6 @@ class State:
         # transport source -> {'status': ..., 'error': ...}, from CONN events
         self.conn = {}
         self.auto_reconnect = False
-        # Mouse reporting is on: in-app select-to-copy works. F6 turns it off to
-        # hand click-and-drag back to the terminal emulator (cross-pane / no
-        # clipboard). Overlays still force mouse on for clickable buttons.
-        self.mouse_enabled = True
         # Set by Console so the dialog can reach the connector that owns the
         # transport; no-ops when the connector does not support reconnecting.
         self.on_reconnect = None
@@ -80,10 +76,6 @@ class State:
 
     def is_show_status_bar(self):
         return self.show_status_bar
-
-    def toggle_mouse(self):
-        self.mouse_enabled = not self.mouse_enabled
-        return self.mouse_enabled
 
     # How a transport is named to the user; anything else falls back to its id.
     CONN_LABELS = {'rtt': 'Device'}
@@ -326,6 +318,20 @@ def create_log_pause_badge(state):
     )
 
 
+def format_toast_fragments(toast):
+    """Herdr-style clipboard toast: green border, dark panel, green check.
+
+    Renders in the status-bar right slot (replacing the clock) as a compact
+    one-line badge so pane heights never jump.
+    """
+    return [
+        ('class:toast.border', '│'),
+        ('class:toast.icon', ' ✓ '),
+        ('class:toast.text', toast),
+        ('class:toast.border', ' │'),
+    ]
+
+
 def create_status_bar(state):
     """
     Create the status bar for the console.
@@ -334,7 +340,8 @@ def create_status_bar(state):
     a message appears (a separate toast strip pushed both panes up one line
     and made drag hit the wrong line).
 
-    Toasts replace the clock on the right; left-side hints stay visible.
+    Toasts replace the clock on the right as a herdr-style badge (green
+    border, dark panel, green check); left-side hints stay visible.
     The PAUSED +N badge sits on the Log pane bottom edge instead.
     """
     def get_statusbar_text():
@@ -345,15 +352,12 @@ def create_status_bar(state):
         # Hints stay up while a toast is showing on the right (replacing clock).
         f5_style = 'class:yellow' if paused else 'class:title'
         f5_label = ' F5 Resume ' if paused else ' F5 Pause '
-        f6_style = 'class:title' if state.mouse_enabled else 'class:yellow'
-        f6_label = ' F6 Mouse ' if state.mouse_enabled else ' F6 Mouse OFF '
         if state.log_filter:
             items.append(('class:yellow', f' FILTER: {state.log_filter} '))
         items.extend([
             ('class:title', ' F3 Focus '),
             ('class:title', ' F4 Reconn '),
             (f5_style, f5_label),
-            (f6_style, f6_label),
             ('class:title', ' F7 Filter '),
             ('class:title', ' F8 Clear '),
             ('class:title', ' Ctrl-Q Quit '),
@@ -367,14 +371,16 @@ def create_status_bar(state):
     def get_statusbar_right():
         toast = state.current_message()
         if toast:
-            return [('class:message', f' {toast} ')]
+            # Herdr-style compact badge: green border, dark panel, green check.
+            return format_toast_fragments(toast)
         return datetime.now().strftime('%H:%M:%S')
 
     def right_width():
         toast = state.current_message()
         if toast:
             # Cap so a long hint cannot crush the left cheatsheet entirely.
-            return LayoutDimension.exact(min(max(len(toast) + 2, 10), 56))
+            # +6 for "│ ✓ " … " │" border/icon chrome around the message.
+            return LayoutDimension.exact(min(max(len(toast) + 6, 12), 56))
         return LayoutDimension.exact(10)
 
     return ConditionalContainer(

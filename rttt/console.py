@@ -92,12 +92,6 @@ class Console:
             # the last single-pane copy without merging buffers.
             self._ctrl_c_copy()
 
-        @bindings.add("f6", eager=True)
-        def _(event):
-            self.state.toggle_mouse()
-            if self.app:
-                self.app.invalidate()
-
         @bindings.add("f7", eager=True)
         def _(event):
             self._open_log_filter()
@@ -262,18 +256,22 @@ class Console:
         self.app = Application(
             layout=Layout(root_container, focused_element=self.input_field),
             key_bindings=bindings,
-            # Mouse on by default (select-to-copy). F6 toggles it off so the
-            # terminal's own selection works across panes / without clipboard.
-            # Hold Shift while dragging for native selection when the emulator
-            # supports that bypass. Overlays force mouse on for buttons.
-            mouse_support=Condition(self._wants_mouse),
+            # Mouse always on for in-app select-to-copy. Hold Shift while
+            # dragging for native selection when the emulator supports that
+            # bypass.
+            mouse_support=True,
             full_screen=True,
             refresh_interval=1,
             enable_page_navigation_bindings=True,
             clipboard=HybridClipboard(),
             style=Style.from_dict({
                 'border': '#888888',
-                'message': 'bg:#bbee88 #222222',
+                # Legacy plain toast class (kept for any stray class:message).
+                'message': 'bg:#1a1a1a #eeeeee bold',
+                # Herdr-style clipboard toast badge (status-bar right).
+                'toast.border': 'bg:#1a1a1a #22cc55 bold',
+                'toast.icon': 'bg:#1a1a1a #22cc55 bold',
+                'toast.text': 'bg:#1a1a1a #eeeeee bold',
                 'statusbar': 'noreverse bg:gray #000000',
                 # Visible pause badge on the Log pane bottom edge.
                 'paused': 'reverse bold bg:ansiyellow #000000',
@@ -356,16 +354,6 @@ class Console:
 
     def has_focus(self, window):
         return self.app.layout.has_focus(window)
-
-    def _wants_mouse(self):
-        """Whether to ask the terminal for mouse reporting.
-
-        On by default for in-app select-to-copy. F6 turns it off. An overlay
-        overrides the toggle so its buttons stay clickable.
-        """
-        if self.state.show_conn_overlay():
-            return True
-        return self.state.mouse_enabled
 
     def _leaf(self):
         """The connector at the end of the middleware chain, which owns the

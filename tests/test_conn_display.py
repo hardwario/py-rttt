@@ -533,48 +533,44 @@ def test_toast_does_not_change_pane_height():
     )
 
 
-def test_mouse_starts_on():
-    state = State()
-    assert state.mouse_enabled is True
-
-
-def test_f6_toggles_the_mouse():
+def test_mouse_support_always_on():
+    """Mouse reporting stays on; F6 toggle was removed as confusing."""
     console, _ = _console_with_leaf()
-    handler = _binding(console, 'f6')
-    assert handler is not None, 'F6 is not bound'
-
-    assert console.state.mouse_enabled is True
-    handler(None)
-    assert console.state.mouse_enabled is False
-    handler(None)
-    assert console.state.mouse_enabled is True
-
-
-def test_mouse_support_follows_the_toggle():
-    console, _ = _console_with_leaf()
-    support = console.app.mouse_support
-
-    assert support()
-    console.state.mouse_enabled = False
-    assert not support()
-
-
-def test_mouse_support_still_forced_on_for_the_overlay():
-    console, _ = _console_with_leaf()
-    console.state.mouse_enabled = False
+    assert console.app.mouse_support()
+    # Overlay still fine with mouse always on.
     console.state.set_conn('rtt', 'disconnected', 'gone')
     assert console.app.mouse_support()
 
 
-def test_status_bar_shows_f6_mouse_state():
+def test_status_bar_has_no_f6_mouse_hint():
     state = State()
-    on = _statusbar_joined(state)
-    assert 'F6 Mouse' in on
-    assert 'Mouse OFF' not in on
+    left = _statusbar_joined(state)
+    assert 'F6' not in left
+    assert 'F7 Filter' in left
+    assert 'F5 Pause' in left
 
-    state.mouse_enabled = False
-    off = _statusbar_joined(state)
-    assert 'F6 Mouse OFF' in off
+
+def test_toast_badge_uses_herdr_style_fragments():
+    """Clipboard toast is a green-border / check badge, not plain text."""
+    import time
+    from rttt.ui import format_toast_fragments
+
+    parts = format_toast_fragments('Copied 12 chars')
+    joined = ''.join(t for _, t in parts)
+    assert '✓' in joined
+    assert 'Copied 12 chars' in joined
+    styles = [s for s, _ in parts]
+    assert any('toast.border' in s for s in styles)
+    assert any('toast.icon' in s for s in styles)
+    assert any('toast.text' in s for s in styles)
+
+    state = State()
+    state.message = 'Copied 12 chars'
+    state.message_expires = time.monotonic() + 60
+    right = _statusbar_right(state)
+    assert '✓' in right
+    assert 'Copied 12 chars' in right
+    assert '│' in right
 
 
 def test_selection_keys_mark_text_in_a_read_only_pane():
@@ -639,8 +635,9 @@ def test_status_bar_toast_replaces_clock_on_the_right():
     assert 'Pasted 12 chars' in toast
     # Left cheatsheet still present while toast is up.
     left = _statusbar_joined(state)
-    assert 'F6 Mouse' in left
+    assert 'F7 Filter' in left
     assert 'Ctrl-C Copy' in left
+    assert 'F6' not in left
 
     state.message = ''
     state.message_expires = 0.0
