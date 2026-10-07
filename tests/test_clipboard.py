@@ -413,7 +413,7 @@ def test_first_drag_from_unfocused_pane_selects_and_copies():
 
             handler(ev(14, MouseEventType.MOUSE_UP))
             assert 'Copied' in console.state.message, console.state.message
-            assert 'resumed' in console.state.message
+            assert 'resumed' not in console.state.message
             clipped = console.app.clipboard.get_data().text
             assert clipped, 'clipboard empty after first drag'
             assert 'LINE1' in clipped
@@ -595,7 +595,7 @@ def test_auto_pause_copy_then_auto_resume():
             handler(ev(14, MouseEventType.MOUSE_UP))
 
             assert 'Copied' in console.state.message
-            assert 'resumed' in console.state.message
+            assert 'resumed' not in console.state.message
             assert console.state.scroll_to_end is True
             assert console._pause_origin is None
             assert buf.selection_state is None
@@ -941,12 +941,12 @@ def test_keyboard_selection_auto_pauses_and_ctrl_c_resumes():
     assert console._pause_origin == 'auto'
     assert console._selected_text(buf) == 'he'  # exclusive end while selecting
 
-    # Ctrl-C path: auto-resume with — resumed toast; copy includes cursor cell.
+    # Ctrl-C path: auto-resume (toast stays plain Copied); copy includes cursor cell.
     cc = _binding(console, 'controlc')
     assert cc is not None
     cc(None)
     assert 'Copied' in console.state.message
-    assert 'resumed' in console.state.message
+    assert 'resumed' not in console.state.message
     assert console.state.scroll_to_end is True
     assert console._pause_origin is None
     assert buf.selection_state is None
@@ -1183,7 +1183,8 @@ def test_right_click_resumes_after_auto_keyboard_pause():
     assert console._pause_origin == 'auto'
 
     console._right_click_copy_pane(buf)
-    assert 'resumed' in console.state.message
+    assert 'Copied' in console.state.message
+    assert 'resumed' not in console.state.message
     assert console.state.scroll_to_end is True
     assert console._pause_origin is None
 
@@ -1268,7 +1269,9 @@ def test_missed_mouse_down_still_anchors_at_move_cell():
             # Must not be a giant selection from the old scroll tip.
             assert end - 4 not in (len(copied),), (len(copied), end)
             assert len(copied) < 80, (len(copied), copied)
-            assert 'resumed' in console.state.message or console.state.scroll_to_end
+            assert console.state.scroll_to_end
+            assert 'Copied' in console.state.message
+            assert 'resumed' not in console.state.message
 
 
 def test_gutter_bridge_forwards_press_as_column_zero():
