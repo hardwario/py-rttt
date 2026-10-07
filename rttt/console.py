@@ -256,9 +256,7 @@ class Console:
         self.app = Application(
             layout=Layout(root_container, focused_element=self.input_field),
             key_bindings=bindings,
-            # Mouse always on for in-app select-to-copy. Hold Shift while
-            # dragging for native selection when the emulator supports that
-            # bypass.
+            # Mouse always on for in-app select-to-copy (status: Mouse drag - copy).
             mouse_support=True,
             full_screen=True,
             refresh_interval=1,
