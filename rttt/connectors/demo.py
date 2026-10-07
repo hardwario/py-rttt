@@ -42,9 +42,12 @@ class DemoConnector(Connector):
         '  help              Show this list\n'
         '  rate              Print current lines/sec\n'
         '  rate <n>          Set lines/sec (e.g. rate 20)\n'
-        '  burst <n>         Emit n lines immediately\n'        '  (log lines use # n.0 <D|I|W|E> for filter level:)\n'
+        '  burst <n>         Emit n lines immediately\n'
         '  disconnect        Simulate link drop\n'
-        '  reconnect         Re-attach (also F4 / overlay)'
+        '  reconnect         Re-attach (also F4 / overlay)\n'
+        'Keys: F7 Filter Log; F5 Pause; F3 Focus; F4 Reconn; F8 Clear.\n'
+        'Log lines use # n.0 <D|I|W|E> (try F7 level:wrn).\n'
+        'Scrollback capped by --max-lines (default 10000; 0 disables).'
     )
 
     def handle(self, event: Event):
