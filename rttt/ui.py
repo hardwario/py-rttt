@@ -318,11 +318,43 @@ def create_log_pause_badge(state):
     )
 
 
-def format_toast_fragments(toast):
-    """Inner line of the herdr-style floating toast (green check + text)."""
+def toast_inner_width(toast, max_inner=52):
+    """Inner width for the toast box (between the side borders)."""
+    msg = toast or ''
+    # " ✓ msg " = leading space + check+space + msg + trailing space.
+    content = 4 + len(msg)
+    return min(max(content, 10), max_inner)
+
+
+def toast_box_width(toast, max_inner=52):
+    """Total float width including left/right box-drawing borders."""
+    return toast_inner_width(toast, max_inner=max_inner) + 2
+
+
+def format_toast_fragments(toast, max_inner=52):
+    """Three-line herdr-style toast with explicit green box-drawing borders.
+
+    Frame border styling does not paint green reliably in common terminals, so
+    every border glyph is emitted as ``class:toast.border`` text instead.
+    """
+    msg = toast or ''
+    inner = toast_inner_width(msg, max_inner=max_inner)
+    # Truncate the message so " ✓ msg " still fits the inner width.
+    max_msg = max(inner - 4, 0)
+    if len(msg) > max_msg:
+        msg = msg[: max(max_msg - 1, 0)] + ('…' if max_msg else '')
+    pad = inner - (4 + len(msg))
+    border = 'class:toast.border'
+    fill = 'class:toast'
     return [
+        (border, '┌' + '─' * inner + '┐\n'),
+        (border, '│'),
+        (fill, ' '),
         ('class:toast.icon', '✓ '),
-        ('class:toast.text', toast),
+        ('class:toast.text', msg),
+        (fill, ' ' + (' ' * pad)),
+        (border, '│\n'),
+        (border, '└' + '─' * inner + '┘'),
     ]
 
 
@@ -331,24 +363,23 @@ def create_toast_overlay(state):
 
     Sits above the status bar (bottom=1) so the clock stays visible. Height is
     three rows (box border + content); width tracks the message like herdr.
+    Borders are drawn as FormattedTextControl glyphs (not Frame), so green
+    ``toast.border`` styles apply on every terminal.
     """
-    def body_fragments():
+    def box_fragments():
         msg = state.current_message()
         if not msg:
             return []
         return format_toast_fragments(msg)
 
     def overlay_width():
-        # Match herdr copy-feedback: len(message) + 4 (borders + "✓ ").
-        msg = state.current_message() or ''
-        return min(max(len(msg) + 4, 12), 56)
+        return toast_box_width(state.current_message() or '')
 
-    panel = Frame(
-        body=Window(
-            FormattedTextControl(body_fragments),
-            height=LayoutDimension.exact(1),
-            style='class:toast',
-        ),
+    panel = Window(
+        FormattedTextControl(box_fragments),
+        height=LayoutDimension.exact(3),
+        dont_extend_width=True,
+        dont_extend_height=True,
         style='class:toast',
     )
 

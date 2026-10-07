@@ -561,35 +561,38 @@ def _toast_float(root):
 
 
 def _toast_float_body_text(toast_float):
-    """Read FormattedTextControl text from the Frame body (middle row)."""
-    from prompt_toolkit.layout.containers import DynamicContainer, VSplit
+    """Read FormattedTextControl text from the toast Window (3-line box)."""
+    from prompt_toolkit.layout.containers import Window
 
-    hsplit = toast_float.content.content
-    mid = next(c for c in hsplit.children if isinstance(c, VSplit) and any(
-        isinstance(ch, DynamicContainer) for ch in c.children
-    ))
-    dyn = next(ch for ch in mid.children if isinstance(ch, DynamicContainer))
-    control = dyn.get_container().content
-    body = control.text()
+    win = toast_float.content.content
+    assert isinstance(win, Window), type(win)
+    control = win.content
+    body = control.text
     if callable(body):
         body = body()
     return ''.join(t for _, t in body)
 
 
 def test_toast_overlay_uses_herdr_style_float():
-    """Clipboard toast is a bottom-right Float with green check, not status-bar pipes."""
+    """Clipboard toast is a bottom-right Float with green boxed check, not status-bar pipes."""
     import time
-    from prompt_toolkit.layout.containers import ConditionalContainer
-    from rttt.ui import create_layout, format_toast_fragments
+    from prompt_toolkit.layout.containers import ConditionalContainer, Window
+    from rttt.ui import create_layout, format_toast_fragments, toast_box_width
 
     parts = format_toast_fragments('Copied 12 chars')
     joined = ''.join(t for _, t in parts)
     assert '✓' in joined
     assert 'Copied 12 chars' in joined
-    assert '│' not in joined, 'pipe badge chrome belongs to the Frame, not fragments'
+    assert '┌' in joined and '└' in joined and '│' in joined
+    assert joined.count('\n') == 2
     styles = [s for s, _ in parts]
+    assert any('toast.border' in s for s in styles)
     assert any('toast.icon' in s for s in styles)
     assert any('toast.text' in s for s in styles)
+    # Every box-drawing glyph must carry toast.border (Frame styling is unused).
+    for style, text in parts:
+        if any(ch in text for ch in '┌┐└┘│─'):
+            assert 'toast.border' in style, (style, text)
 
     state = State()
     state.message = 'Copied 12 chars'
@@ -603,11 +606,14 @@ def test_toast_overlay_uses_herdr_style_float():
     root, *_ = create_layout(state, None)
     toast_float = _toast_float(root)
     assert toast_float.height == 3
+    assert toast_float.width() == toast_box_width('Copied 12 chars')
     assert isinstance(toast_float.content, ConditionalContainer)
     assert toast_float.content.filter()
+    assert isinstance(toast_float.content.content, Window)
     body_text = _toast_float_body_text(toast_float)
     assert '✓' in body_text
     assert 'Copied 12 chars' in body_text
+    assert '┌' in body_text and '└' in body_text
 
 
 def test_selection_keys_mark_text_in_a_read_only_pane():
@@ -681,7 +687,7 @@ def test_status_bar_clock_stays_while_toast_float_is_up():
     root, *_ = create_layout(state, None)
     toast_float = _toast_float(root)
     assert toast_float.content.filter()
-    assert toast_float.width() >= len('Pasted 12 chars') + 4
+    assert toast_float.width() == len('Pasted 12 chars') + 6
 
     state.message = ''
     state.message_expires = 0.0
