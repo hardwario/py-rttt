@@ -267,8 +267,10 @@ class Console:
                 # Legacy plain toast class (kept for any stray class:message).
                 'message': 'bg:#1a1a1a #eeeeee bold',
                 # Herdr-style floating clipboard toast (dark panel, green border).
+                # Borders are drawn as text glyphs with toast.border (Frame borders
+                # do not pick up green reliably in xfce4-terminal).
                 'toast': 'bg:#1a1a1a #eeeeee',
-                'toast frame.border': 'bg:#1a1a1a #22cc55 bold',
+                'toast.border': 'bg:#1a1a1a #22cc55 bold',
                 'toast.icon': 'bg:#1a1a1a #22cc55 bold',
                 'toast.text': 'bg:#1a1a1a #eeeeee bold',
                 'statusbar': 'noreverse bg:gray #000000',
