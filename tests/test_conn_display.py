@@ -338,10 +338,10 @@ def test_status_bar_hints_f4():
     control = create_status_bar(state).content.children[0].content
     texts = [t for _, t in control.text()]
     joined = ' '.join(texts)
-    # Short labels keep Copy / Shift-drag visible on ~80–100 columns.
+    # Short labels keep Copy / Mouse drag visible on ~80–100 columns.
     assert 'F4' in joined and 'Reconn' in joined
     assert 'Ctrl-Q' in joined, 'F10 may be captured by the desktop; Ctrl-Q must stay documented'
-    assert 'Shift-drag' in joined
+    assert 'Mouse drag - copy' in joined
     assert 'Copy' in joined
 
 
@@ -473,7 +473,7 @@ def test_status_bar_shows_toast_inline_while_paused():
     assert 'PAUSED' not in left
     # Left hints stay visible; toast replaces the clock on the right.
     assert 'F5 Resume' in left
-    assert 'Shift-drag' in left
+    assert 'Mouse drag - copy' in left
     assert 'Copied 27 chars — resumed' in right
     assert 'Copied' not in left
 

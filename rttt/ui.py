@@ -348,7 +348,7 @@ def create_status_bar(state):
         paused = not state.scroll_to_end
         items = [('class:title', ' RTTT ')]
 
-        # Keep hints short so Copy / Shift-drag stay visible around 80–100 cols.
+        # Keep hints short so Copy / Mouse drag stay visible around 80–100 cols.
         # Hints stay up while a toast is showing on the right (replacing clock).
         f5_style = 'class:yellow' if paused else 'class:title'
         f5_label = ' F5 Resume ' if paused else ' F5 Pause '
@@ -362,7 +362,7 @@ def create_status_bar(state):
             ('class:title', ' F8 Clear '),
             ('class:title', ' Ctrl-Q Quit '),
             ('class:title', ' Ctrl-C Copy '),
-            ('class:title', ' Shift-drag native '),
+            ('class:title', ' Mouse drag - copy '),
         ])
         # No disconnect indicator here: the overlay stays up for as long as the
         # transport is down, so a second copy on the bar is just noise.
