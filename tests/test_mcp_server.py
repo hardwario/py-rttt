@@ -843,3 +843,74 @@ def test_tool_annotations_tell_reads_from_writes():
     assert tools['read_memory'].read_only_hint is False
     # Every tool talks to the one probe, nothing beyond it.
     assert all(a is not None and a.open_world_hint is False for a in tools.values())
+
+
+def test_flash_reports_progress_to_the_client(tmp_path):
+    """A flash takes ~20 s; progress notifications show the client it moves."""
+    from mcp import Client
+
+    firmware = tmp_path / 'fw.hex'
+    firmware.write_text(':00000001FF\n')
+
+    class FlashingConnector(FakeConnector):
+        def handle(self, event):
+            # Called from an executor thread, like the real connector, which
+            # emits its events back into the middleware's loop.
+            if event.type != EventType.FLASH:
+                return
+            for data in ({'status': 'start'},
+                         {'status': 'progress', 'action': 'Program', 'message': 'Programming', 'percentage': 10},
+                         {'status': 'progress', 'action': 'Program', 'message': 'Programming', 'percentage': 10},
+                         {'status': 'progress', 'action': 'Verify', 'message': 'Verifying', 'percentage': 100},
+                         {'status': 'done'}):
+                asyncio.run_coroutine_threadsafe(
+                    m._process(Event(EventType.FLASH, data)), loop).result()
+
+    m = MCPMiddleware(FlashingConnector(), listen='127.0.0.1:0')
+    reports = []
+
+    async def on_progress(progress, total, message):
+        reports.append((progress, total, message))
+
+    async def run():
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        async with Client(m._mcp) as client:
+            return await client.call_tool(
+                'flash', {'file_path': str(firmware)}, progress_callback=on_progress)
+
+    loop = None
+    result = asyncio.run(run())
+    assert json.loads(result.content[0].text)['status'] == 'done'
+    # The repeated 10 % is not reported twice.
+    assert reports == [(10, 100, 'Programming'), (100, 100, 'Verifying')]
+
+
+def test_flash_replies_only_after_the_connector_returns(tmp_path):
+    """The J-Link connector restarts RTT after it reports "done"; the reply
+    must wait for that, or the next call races the restart."""
+    firmware = tmp_path / 'fw.hex'
+    firmware.write_text(':00000001FF\n')
+    order = []
+
+    class SlowFinishConnector(FakeConnector):
+        def handle(self, event):
+            if event.type != EventType.FLASH:
+                return
+            asyncio.run_coroutine_threadsafe(
+                m._process(Event(EventType.FLASH, {'status': 'done'})), loop).result()
+            time.sleep(0.2)
+            order.append('rtt restarted')
+
+    m = MCPMiddleware(SlowFinishConnector(), listen='127.0.0.1:0')
+
+    async def run():
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        result = tool_result(await m._mcp.call_tool('flash', {'file_path': str(firmware)}))
+        order.append('replied')
+        return result
+
+    loop = None
+    assert asyncio.run(run())['status'] == 'done'
+    assert order == ['rtt restarted', 'replied']

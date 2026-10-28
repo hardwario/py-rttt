@@ -50,6 +50,14 @@ def _request_headers(ctx: Context):
         return None
 
 
+async def _report_progress(ctx: Context, progress: float, total: float, message: str) -> None:
+    """Send a progress notification, unless no request is behind the call."""
+    try:
+        await ctx.report_progress(progress, total, message)
+    except ValueError:
+        pass
+
+
 def _hexdump(addr: int, data: bytes) -> list:
     """Format bytes as classic hexdump lines with address and ASCII column."""
     lines = []
@@ -110,6 +118,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._conn_event = asyncio.Event()
         self._flash_done = None
         self._flash_activity = None
+        self._flash_progress = None
         self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
         self._dump_dir = os.path.join(tempfile.gettempdir(), f'rttt-dumps-{self.port}')
         self._mcp = MCPServer(name, version=__version__, log_level="CRITICAL")
@@ -302,8 +311,11 @@ class MCPMiddleware(AsyncMiddleware):
                                                   "error": data.get("error", "")}
             self._conn_event.set()
         elif event.type == EventType.FLASH:
-            # skip per-sector progress events — hundreds of them per flash
-            if event.data.get("status") != "progress":
+            # skip per-sector progress events — hundreds of them per flash;
+            # only the latest is kept, for the client's progress notifications
+            if event.data.get("status") == "progress":
+                self._flash_progress = event.data
+            else:
                 self._flash_events.append(event.data)
             if self._flash_activity is not None:
                 self._flash_activity.set()
@@ -656,12 +668,12 @@ class MCPMiddleware(AsyncMiddleware):
                     pass
 
         @self._mcp.tool(annotations=_DESTRUCTIVE)
-        async def flash(file_path: str, addr: int = 0) -> dict:
+        async def flash(ctx: Context, file_path: str, addr: int = 0) -> dict:
             """Flash a firmware file (.hex, .bin, .elf, .srec) to the target device.
 
             Stops the connection, programs the flash memory, resets the device,
-            and restarts the connection. Progress is reported to the console during
-            flashing. The buffered terminal/log history is cleared, so read_log
+            and restarts the connection. Progress is reported to the console and
+            as MCP progress notifications during flashing. The buffered terminal/log history is cleared, so read_log
             and read_terminal afterwards only show output from the new firmware.
 
             Common firmware locations:
@@ -690,12 +702,27 @@ class MCPMiddleware(AsyncMiddleware):
             middleware._log_lines.clear()
 
             middleware._flash_events = []
+            middleware._flash_progress = None
             middleware._flash_done = asyncio.Event()
             middleware._flash_activity = asyncio.Event()
+            reported = None
+
+            async def report():
+                nonlocal reported
+                progress = middleware._flash_progress
+                if progress is None:
+                    return
+                step = (progress.get("percentage", 0), progress.get("message", ""))
+                if step != reported:
+                    reported = step
+                    await _report_progress(ctx, step[0], 100, step[1])
 
             try:
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
+                # The J-Link connector flashes inside handle() and returns only
+                # when it is done, so wait on it alongside the flash events:
+                # that is what lets progress reach the client while it runs.
+                work = loop.run_in_executor(
                     None,
                     middleware.connector.handle,
                     Event(EventType.FLASH, {"file": file_path, "addr": addr})
@@ -704,14 +731,29 @@ class MCPMiddleware(AsyncMiddleware):
                 # Wait for completion with a stall detector instead of a fixed
                 # overall limit: any flash event (including per-sector progress)
                 # counts as activity, so big images over a slow SWD link are
-                # fine while a genuinely stuck operation still errors out.
+                # fine while a genuinely stuck operation still errors out. It
+                # only applies once handle() has returned; while it runs, the
+                # erase phase reports no progress at all.
                 while not middleware._flash_done.is_set():
                     middleware._flash_activity.clear()
-                    try:
-                        await asyncio.wait_for(middleware._flash_activity.wait(), timeout=60.0)
-                    except asyncio.TimeoutError:
+                    activity = asyncio.ensure_future(middleware._flash_activity.wait())
+                    waiting = {activity, work} if work is not None else {activity}
+                    done, _ = await asyncio.wait(
+                        waiting, timeout=None if work is not None else 60.0,
+                        return_when=asyncio.FIRST_COMPLETED)
+                    activity.cancel()
+                    if not done:
                         return {"status": "error",
                                 "error": "Flash operation stalled (no progress for 60 s)"}
+                    if work in done:
+                        work.result()
+                        work = None
+                    await report()
+                if work is not None:
+                    # "done" can arrive before handle() has restarted RTT; reply
+                    # only once the session is back, as callers expect.
+                    await work
+                await report()
 
                 final = middleware._flash_events[-1] if middleware._flash_events else {}
                 result = {
