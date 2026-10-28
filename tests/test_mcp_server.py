@@ -301,6 +301,9 @@ def test_read_log_is_one_block_with_line_breaks():
 
     result = asyncio.run(run())
     assert [c.text for c in result.content] == ['line 1\nline 2']
+    # A str return would otherwise also go out as structuredContent, the
+    # whole log a second time.
+    assert result.structured_content is None
 
 
 def test_read_terminal_is_one_json_block():
@@ -312,6 +315,7 @@ def test_read_terminal_is_one_json_block():
 
     result = asyncio.run(run())
     assert len(result.content) == 1
+    assert result.structured_content is None
     assert json.loads(result.content[0].text) == [
         {'direction': 'in', 'text': 'kernel version'},
         {'direction': 'out', 'text': 'Zephyr version 4.4.0'},
@@ -825,6 +829,7 @@ def test_download_serves_a_dump_and_nothing_else(tmp_path):
     assert run_http_get(app, '/download', b'filename=a.bin') == (200, conn.jlink.image[:64])
     assert run_http_get(app, '/download', b'filename=../secret.txt')[0] == 404
     assert run_http_get(app, '/download', b'filename=missing.bin')[0] == 404
+    assert run_http_get(app, '/download', b'filename=a%00.bin')[0] == 404
     assert run_http_get(app, '/download')[0] == 400
 
 
@@ -984,3 +989,42 @@ def test_download_refuses_a_dump_dir_someone_else_could_write(tmp_path):
     assert run_http_get(m._build_app(), '/download', b'filename=planted.bin')[0] == 404
     with pytest.raises(Exception):
         asyncio.run(m._mcp.read_resource('rttt://dumps/planted.bin'))
+
+
+def test_read_memory_dump_url_mentions_the_token_when_one_is_set(tmp_path):
+    conn = FakeMemConnector()
+    m = MCPMiddleware(conn, listen='127.0.0.1:0', token='s3cret')
+    m._dump_dir = str(tmp_path / 'dumps')
+
+    result = asyncio.run(m._mcp.call_tool(
+        'read_memory', {'address': '0x10000', 'length': 16, 'to_file': 'a.bin'}))
+    info = json.loads(result.content[0].text)
+    assert 'Authorization: Bearer' in info['url_auth']
+    assert 's3cret' not in json.dumps(info)
+
+
+def test_cancelled_flash_leaves_no_task_behind(tmp_path):
+    firmware = tmp_path / 'fw.hex'
+    firmware.write_text(':00000001FF\n')
+    release = threading.Event()
+
+    class HangingConnector(FakeConnector):
+        def handle(self, event):
+            release.wait(5)
+
+    m = MCPMiddleware(HangingConnector(), listen='127.0.0.1:0')
+
+    async def run():
+        call = asyncio.ensure_future(m._mcp.call_tool('flash', {'file_path': str(firmware)}))
+        await asyncio.sleep(0.1)
+        call.cancel()
+        try:
+            await call
+        except BaseException:
+            pass
+        await asyncio.sleep(0)
+        left = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        release.set()
+        return left
+
+    assert asyncio.run(run()) == []

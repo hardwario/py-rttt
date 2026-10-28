@@ -339,7 +339,7 @@ class MCPMiddleware(AsyncMiddleware):
     def _dump_file(self, name: str):
         """Path of dump `name` in the dump directory, or None when `name` is
         not a plain file name (a dump is only ever served from there)."""
-        if not name or os.path.basename(name) != name or name in ('.', '..'):
+        if not name or os.path.basename(name) != name or name in ('.', '..') or '\0' in name:
             return None
         return os.path.join(self._dump_dir, name)
 
@@ -485,14 +485,16 @@ class MCPMiddleware(AsyncMiddleware):
                     "error": str(e),
                 }
 
-        @self._mcp.tool(annotations=_READ)
+        # A str return would also go out as structuredContent {"result": ...},
+        # the whole text a second time.
+        @self._mcp.tool(structured_output=False, annotations=_READ)
         def read_terminal(lines: int = 100) -> str:
             """Read recent terminal output. Returns JSON array with direction (in/out) and text."""
             # One content block: a list return becomes a block per line, and
             # clients may join blocks without a separator.
             return json.dumps(list(middleware._terminal_lines)[-lines:], indent=2)
 
-        @self._mcp.tool(annotations=_READ)
+        @self._mcp.tool(structured_output=False, annotations=_READ)
         def read_log(lines: int = -1, after_cursor: int = -1, pattern: str = "") -> str:
             """Read log output from the device, one line per log entry. Logs are
             kept in a ring buffer and can be read repeatedly. If you need buffer
@@ -839,10 +841,13 @@ class MCPMiddleware(AsyncMiddleware):
                     middleware._flash_activity.clear()
                     activity = asyncio.ensure_future(middleware._flash_activity.wait())
                     waiting = {activity, work} if work is not None else {activity}
-                    done, _ = await asyncio.wait(
-                        waiting, timeout=None if work is not None else 60.0,
-                        return_when=asyncio.FIRST_COMPLETED)
-                    activity.cancel()
+                    try:
+                        done, _ = await asyncio.wait(
+                            waiting, timeout=None if work is not None else 60.0,
+                            return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        # asyncio.wait leaves it running when this call is cancelled.
+                        activity.cancel()
                     if not done:
                         return {"status": "error",
                                 "error": "Flash operation stalled (no progress for 60 s)"}
@@ -1074,7 +1079,8 @@ class MCPMiddleware(AsyncMiddleware):
                     server's machine, read the resource link (clients such as
                     Claude Code save the bytes to a local file rather than
                     into the conversation) or download the `url`:
-                    `curl -o slot0.bin '<url>'`.
+                    `curl -o slot0.bin '<url>'`, adding the Authorization
+                    header when the reply has `url_auth`.
             """
             conn = middleware._leaf()
             try:
@@ -1132,6 +1138,9 @@ class MCPMiddleware(AsyncMiddleware):
                 query = f'/download?filename={quote(name)}'
                 host = (_request_headers(ctx) or {}).get('host')
                 result["url"] = f'http://{host}{query}' if host else query
+                if middleware.token:
+                    result["url_auth"] = ("send the same 'Authorization: Bearer <token>' "
+                                          "header as for the MCP endpoint")
                 link = mcp_types.ResourceLink(
                     uri=f'rttt://dumps/{quote(name)}', name=name,
                     mime_type='application/octet-stream', size=result["length"])
