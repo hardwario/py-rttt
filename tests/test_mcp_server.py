@@ -970,3 +970,17 @@ def test_private_dir_tightens_a_directory_left_open(tmp_path):
 
     _private_dir(str(d))
     assert (d.stat().st_mode & 0o777) == 0o700
+
+
+def test_download_refuses_a_dump_dir_someone_else_could_write(tmp_path):
+    # rttt never wrote here, so nothing vouched for the directory: one left
+    # open to others is not served from.
+    m, _ = make_mem_middleware(tmp_path)
+    os.makedirs(m._dump_dir)
+    os.chmod(m._dump_dir, 0o777)
+    with open(os.path.join(m._dump_dir, 'planted.bin'), 'wb') as f:
+        f.write(b'planted')
+
+    assert run_http_get(m._build_app(), '/download', b'filename=planted.bin')[0] == 404
+    with pytest.raises(Exception):
+        asyncio.run(m._mcp.read_resource('rttt://dumps/planted.bin'))

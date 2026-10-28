@@ -87,18 +87,38 @@ def _private_dir(path: str) -> str:
     return path
 
 
+def _is_private_dir(path: str) -> bool:
+    """True when `path` is a directory as _private_dir leaves it. Checked
+    before serving from it, without creating anything."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    if hasattr(os, 'getuid'):
+        return st.st_uid == os.getuid() and not st.st_mode & 0o077
+    return True
+
+
 def _create_private_file(path: str):
     """Open `path` for writing without following a symlink planted there."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
     return os.fdopen(os.open(path, flags, 0o600), 'wb')
 
 
-def _is_regular_file(path: str) -> bool:
-    """True for a plain file, False for a symlink, a directory or nothing."""
+def _read_private_file(path: str):
+    """Bytes of the plain file at `path`, or None for a symlink, a directory
+    or nothing. The check runs on the opened descriptor, so the file cannot
+    be swapped for a symlink in between."""
     try:
-        return stat.S_ISREG(os.lstat(path).st_mode)
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     except OSError:
-        return False
+        return None
+    with os.fdopen(fd, 'rb') as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return None
+        return f.read()
 
 
 def _request_headers(ctx: Context):
@@ -303,17 +323,18 @@ class MCPMiddleware(AsyncMiddleware):
 
             Usage: curl -o slot0.bin 'http://host:port/download?filename=slot0.bin'
             """
-            from starlette.responses import FileResponse, JSONResponse
+            from starlette.responses import JSONResponse, Response
 
             filename = request.query_params.get('filename', '')
             if not filename:
                 return JSONResponse(
                     {"status": "error", "error": "missing ?filename= query parameter"},
                     status_code=400)
-            path = middleware._dump_file(filename)
-            if path is None or not _is_regular_file(path):
+            data = middleware._read_dump(filename)
+            if data is None:
                 return JSONResponse({"status": "error", "error": "no such dump"}, status_code=404)
-            return FileResponse(path, media_type='application/octet-stream', filename=filename)
+            return Response(data, media_type='application/octet-stream', headers={
+                'Content-Disposition': f"attachment; filename*=UTF-8''{quote(filename)}"})
 
     def _dump_file(self, name: str):
         """Path of dump `name` in the dump directory, or None when `name` is
@@ -321,6 +342,14 @@ class MCPMiddleware(AsyncMiddleware):
         if not name or os.path.basename(name) != name or name in ('.', '..'):
             return None
         return os.path.join(self._dump_dir, name)
+
+    def _read_dump(self, name: str):
+        """Bytes of dump `name`, or None. Served only from a dump directory
+        that is still private to this user, whoever created it."""
+        path = self._dump_file(name)
+        if path is None or not _is_private_dir(self._dump_dir):
+            return None
+        return _read_private_file(path)
 
     def _leaf(self):
         """Descend the middleware chain to the leaf (J-Link) connector."""
@@ -1250,11 +1279,10 @@ class MCPMiddleware(AsyncMiddleware):
         @self._mcp.resource('rttt://dumps/{name}', mime_type='application/octet-stream')
         def memory_dump(name: str) -> bytes:
             """Raw bytes of a memory dump written by `read_memory` with `to_file`."""
-            path = middleware._dump_file(name)
-            if path is None or not _is_regular_file(path):
+            data = middleware._read_dump(name)
+            if data is None:
                 raise ValueError(f'No such dump: {name}')
-            with open(path, 'rb') as f:
-                return f.read()
+            return data
 
         @self._mcp.prompt()
         def debug_device() -> str:
