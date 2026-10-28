@@ -18,19 +18,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
         with:
           python-version: "3.12"
 
-      - name: Install code style checkers
-        run: pip install pycodestyle pyflakes
-
       - name: Check code style
-        run: pycodestyle --ignore=E501 rttt
+        run: uv run --locked --only-group dev pycodestyle --ignore=E501 rttt
 
       - name: Check for unused imports and undefined names
-        run: pyflakes rttt
+        run: uv run --locked --only-group dev pyflakes rttt
 
   test_build:
     needs: codestyle
@@ -48,41 +45,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: "Set up Python ${{ matrix.python-version }}"
-        uses: actions/setup-python@v7
+      - name: "Install uv with Python ${{ matrix.python-version }}"
+        uses: astral-sh/setup-uv@v10
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install Poetry
-        run: |
-          curl -sSL https://install.python-poetry.org | sed 's/symlinks=False/symlinks=True/' | python3 -
-
-      - name: Update PATH
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Update Poetry configuration
-        run: poetry config virtualenvs.create false
-
-      - name: Check that poetry.lock matches pyproject.toml
-        run: poetry check --lock
+      - name: Check that uv.lock matches pyproject.toml
+        run: uv lock --check
 
       - name: Install dependencies
-        run: poetry sync --no-interaction
+        run: uv sync --locked
 
       - name: Run tests
-        run: poetry run pytest
+        run: uv run --locked pytest
 
       - name: Test run
-        run: poetry run rttt --version
+        run: uv run --locked rttt --version
 
       - name: Package project
-        run: poetry build
+        run: uv build --no-sources
 
   coinstall:
     # rttt has to stay installable alongside the Zephyr toolchain, which pins
     # pylink-square <2.0 via pyocd. Requiring ^2.0.1 made the two unresolvable:
     # `west packages pip --install` gave up, and pip on its own backtracked
     # through ancient releases looking for a way out.
+    #
+    # Plain pip rather than uv on purpose: it is what developers and
+    # `west packages pip --install` actually run, so it is what has to pass.
     #
     # Resolved from an empty environment on purpose. Installing into an image
     # that already has the packages hides the conflict, because pip leaves what

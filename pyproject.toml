@@ -1,15 +1,16 @@
-[tool.poetry]
+[project]
 name = "rttt"
 version = "1.11.0"
 description = "HARDWARIO Real Time Transfer Terminal Console"
-authors = ["Karel Blavka <karel.blavka@hardwario.com>"]
+authors = [
+    { name = "Karel Blavka", email = "karel.blavka@hardwario.com" },
+]
 license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
-homepage = "https://github.com/hardwario/py-rttt"
-repository = "https://github.com/hardwario/py-rttt"
+requires-python = ">=3.10,<4"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
-    "License :: OSI Approved :: MIT License",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -21,33 +22,39 @@ classifiers = [
     "Topic :: Utilities",
     "Environment :: Console"
 ]
-
-packages = [
-    { include = "rttt" },
+dependencies = [
+    "click>=8.3.2,<9",
+    "loguru>=0.7.3,<0.8",
+    "prompt-toolkit>=3.0.52,<4",
+    "pyperclip>=1.11.0,<2",
+    # Keep the floor below 2.0: the Zephyr toolchain pins pylink-square <2.0
+    # through pyocd, see the coinstall job in .github/workflows/test.yaml.
+    "pylink-square>=1.7.0,<3",
+    "pyyaml>=6.0.3,<7",
+    "mcp>=1.27,<2",
 ]
 
-[tool.poetry.scripts]
+[project.urls]
+Homepage = "https://github.com/hardwario/py-rttt"
+Repository = "https://github.com/hardwario/py-rttt"
+
+[project.scripts]
 rttt = "rttt.cli:main"
 
-[tool.poetry.dependencies]
-python = ">=3.10, <4"
-click = "^8.3.2"
-loguru = "^0.7.3"
-prompt-toolkit = "^3.0.52"
-pyperclip = "^1.11.0"
-pylink-square = ">=1.7.0,<3.0.0"
-pyyaml = "^6.0.3"
-mcp = "^1.27"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^9.0.3"
-pexpect = "^4.9.0"
-ptyprocess = "^0.7.0"
-pyte = "^0.8.2"
-
-[poetry.group.dev.dependencies]
-pycodestyle = "^2.12.1"
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3,<10",
+    "pexpect>=4.9.0,<5",
+    "ptyprocess>=0.7.0,<0.8",
+    "pyte>=0.8.2,<0.9",
+    "pycodestyle>=2.12.1",
+    "pyflakes>=3.2.0",
+]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.12.3,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "rttt"
+module-root = ""

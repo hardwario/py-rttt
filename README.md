@@ -29,15 +29,45 @@ This package is particularly useful for **debugging, logging, and real-time data
 
 ## Installation
 
-To install the package, use:
+`rttt` is published on [PyPI](https://pypi.org/project/rttt/) and needs Python 3.10 or newer.
+
+### With uv (recommended)
+
+[uv](https://docs.astral.sh/uv/) installs `rttt` as a standalone tool in its own isolated environment and puts the `rttt` command on your `PATH`:
 
 ```bash
+uv tool install rttt
+```
+
+Upgrade or remove it later with:
+
+```bash
+uv tool upgrade rttt
+uv tool uninstall rttt
+```
+
+To try it without installing anything permanently:
+
+```bash
+uvx rttt --demo
+```
+
+### With pip in a virtual environment
+
+Create a virtual environment, activate it and install `rttt` into it:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install rttt
 ```
 
-To verify the installation, run:
+The `rttt` command is available while the environment is active. Upgrade with `pip install --upgrade rttt`.
+
+### Verify the installation
 
 ```bash
+rttt --version
 rttt --help
 ```
 
@@ -160,7 +190,7 @@ A green pytest run is still **not** enough after mouse / toast / clipboard chang
 
 ```bash
 rttt --demo
-# or: pytest tests/test_tui_pty.py -v
+# or: uv run pytest tests/test_tui_pty.py -v
 ```
 
 Manual checklist:
@@ -451,6 +481,40 @@ curl -H 'Authorization: Bearer <TOKEN>' \
 > no authentication. The default bind is `127.0.0.1`; set a token before
 > exposing them with `--mcp-listen 0.0.0.0:8090` outside a trusted network
 > (see [Authentication](#authentication)).
+
+## Development
+
+The project is managed with [uv](https://docs.astral.sh/uv/). Clone the repository and create the development environment (runtime and dev dependencies, pinned by `uv.lock`):
+
+```bash
+git clone https://github.com/hardwario/py-rttt.git
+cd py-rttt
+uv sync
+```
+
+Run the tool and the checks from the working tree:
+
+```bash
+uv run rttt --demo
+uv run pytest
+uv run pycodestyle --ignore=E501 rttt
+uv run pyflakes rttt
+```
+
+Build the sdist and wheel into `dist/`:
+
+```bash
+uv build
+```
+
+Without uv, an editable install into a plain virtual environment works too:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e . --group dev     # pip >= 25.1; older pip: pip install -e . pytest pexpect pyte
+pytest
+```
 
 ## License
 
