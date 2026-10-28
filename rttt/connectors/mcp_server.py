@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import socket
 import tempfile
@@ -317,14 +318,17 @@ class MCPMiddleware(AsyncMiddleware):
                 }
 
         @self._mcp.tool()
-        def read_terminal(lines: int = 100) -> list:
+        def read_terminal(lines: int = 100) -> str:
             """Read recent terminal output. Returns JSON array with direction (in/out) and text."""
-            return list(middleware._terminal_lines)[-lines:]
+            # One content block: a list return becomes a block per line, and
+            # clients may join blocks without a separator.
+            return json.dumps(list(middleware._terminal_lines)[-lines:], indent=2)
 
         @self._mcp.tool()
-        def read_log(lines: int = -1, after_cursor: int = -1, pattern: str = "") -> list:
-            """Read log output from the device. Logs are kept in a ring buffer
-            and can be read repeatedly. If you need buffer state, use the `status` tool.
+        def read_log(lines: int = -1, after_cursor: int = -1, pattern: str = "") -> str:
+            """Read log output from the device, one line per log entry. Logs are
+            kept in a ring buffer and can be read repeatedly. If you need buffer
+            state, use the `status` tool.
 
             Args:
                 lines: Number of lines to return (-1 = all buffered).
@@ -350,7 +354,7 @@ class MCPMiddleware(AsyncMiddleware):
                     result = [line for line in result if regex.search(line)]
                 except re.error:
                     pass
-            return result
+            return '\n'.join(result)
 
         @self._mcp.tool()
         async def wait_for_state(pattern: str, timeout: float = 60.0,

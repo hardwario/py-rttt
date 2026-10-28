@@ -279,12 +279,42 @@ def test_read_log_after_cursor_and_pattern():
         m, _ = make_middleware()
         for i in range(5):
             await m._process(Event(EventType.LOG, f'line {i}'))
-        result = await m._mcp.call_tool('read_log', {'after_cursor': 3})
-        logs = result[0] if isinstance(result, tuple) else result
-        return m, logs
+        after = await m._mcp.call_tool('read_log', {'after_cursor': 3})
+        matched = await m._mcp.call_tool('read_log', {'pattern': r'line [13]'})
+        return m, after, matched
 
-    m, _ = asyncio.run(run())
+    m, after, matched = asyncio.run(run())
     assert m._log_cursor == 5
+    assert [c.text for c in after.content] == ['line 3\nline 4']
+    assert [c.text for c in matched.content] == ['line 1\nline 3']
+
+
+def test_read_log_is_one_block_with_line_breaks():
+    """Clients may join content blocks without a separator, so every line
+    in its own block reached the model as one run-on line."""
+    async def run():
+        m, _ = make_middleware()
+        for i in range(3):
+            await m._process(Event(EventType.LOG, f'line {i}'))
+        return await m._mcp.call_tool('read_log', {'lines': 2})
+
+    result = asyncio.run(run())
+    assert [c.text for c in result.content] == ['line 1\nline 2']
+
+
+def test_read_terminal_is_one_json_block():
+    async def run():
+        m, _ = make_middleware()
+        await m._process(Event(EventType.IN, 'kernel version'))
+        await m._process(Event(EventType.OUT, 'Zephyr version 4.4.0'))
+        return await m._mcp.call_tool('read_terminal', {})
+
+    result = asyncio.run(run())
+    assert len(result.content) == 1
+    assert json.loads(result.content[0].text) == [
+        {'direction': 'in', 'text': 'kernel version'},
+        {'direction': 'out', 'text': 'Zephyr version 4.4.0'},
+    ]
 
 
 def run_auth_request(token, auth_header):
