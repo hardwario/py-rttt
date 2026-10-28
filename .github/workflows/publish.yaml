@@ -26,15 +26,17 @@ jobs:
       - name: Package project
         run: uv build --no-sources
 
-      - name: Smoke test the built wheel
-        run: uv run --isolated --no-project --with dist/*.whl rttt --version
-
+      # Stored before the smoke test runs any dependency code, so nothing
+      # it pulls from PyPI can touch what gets published.
       - name: Store the distributions
         uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
           if-no-files-found: error
+
+      - name: Smoke test the built wheel
+        run: uv run --isolated --no-project --with dist/*.whl rttt --version
 
   pypi-publish:
     name: Upload release to PyPI
