@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import tempfile
 import time
 from collections import deque
@@ -10,6 +11,7 @@ from urllib.parse import quote
 import mcp_types
 from loguru import logger
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from rttt import __version__
 from rttt.connectors.base import Connector
 from rttt.connectors.middleware import AsyncMiddleware
@@ -36,6 +38,67 @@ class _BearerAuthMiddleware:
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+_LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '::1')
+
+
+class _HostGuardMiddleware:
+    """DNS rebinding protection for every route, not only /mcp.
+
+    The SDK checks Host and Origin on its own endpoint, which left /upload
+    and /download open to a web page that rebinds its name to 127.0.0.1.
+    Same allow-list the SDK applies to a loopback bind.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.security = TransportSecurityMiddleware(TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=['127.0.0.1:*', 'localhost:*', '[::1]:*'],
+            allowed_origins=['http://127.0.0.1:*', 'http://localhost:*', 'http://[::1]:*']))
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            from starlette.requests import Request
+            response = await self.security.validate_request(Request(scope, receive))
+            if response is not None:
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _private_dir(path: str) -> str:
+    """Create `path` as a directory only this user can enter, or refuse.
+
+    The upload and dump directories sit in the shared temp dir under
+    predictable names, so another local user could create one first, or
+    plant a symlink there, and read or redirect what rttt writes.
+    """
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(f'{path} is not a directory')
+    if hasattr(os, 'getuid'):
+        if st.st_uid != os.getuid():
+            raise OSError(f'{path} belongs to another user')
+        if st.st_mode & 0o077:
+            os.chmod(path, 0o700)
+    return path
+
+
+def _create_private_file(path: str):
+    """Open `path` for writing without following a symlink planted there."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
+    return os.fdopen(os.open(path, flags, 0o600), 'wb')
+
+
+def _is_regular_file(path: str) -> bool:
+    """True for a plain file, False for a symlink, a directory or nothing."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _request_headers(ctx: Context):
@@ -155,12 +218,19 @@ class MCPMiddleware(AsyncMiddleware):
         """
         import uvicorn
 
+        config = uvicorn.Config(self._build_app(), host=self.host, port=self.port, log_level='critical')
+        self._server = uvicorn.Server(config)
+        await self._server.serve()
+
+    def _build_app(self):
+        """The ASGI app: the MCP endpoint and the custom routes, with bearer
+        auth and, on a loopback bind, Host checks in front of all of them."""
         app = self._mcp.streamable_http_app(stateless_http=True, host=self.host)
         if self.token:
             app = _BearerAuthMiddleware(app, self.token)
-        config = uvicorn.Config(app, host=self.host, port=self.port, log_level='critical')
-        self._server = uvicorn.Server(config)
-        await self._server.serve()
+        if self.host in _LOOPBACK_HOSTS:
+            app = _HostGuardMiddleware(app)
+        return app
 
     def open(self):
         super().open()
@@ -218,10 +288,12 @@ class MCPMiddleware(AsyncMiddleware):
                 return JSONResponse({"status": "error", "error": "file too large (max 64 MiB)"},
                                     status_code=413)
 
-            os.makedirs(middleware._upload_dir, exist_ok=True)
-            path = os.path.join(middleware._upload_dir, filename)
-            with open(path, 'wb') as f:
-                f.write(data)
+            try:
+                path = os.path.join(_private_dir(middleware._upload_dir), filename)
+                with _create_private_file(path) as f:
+                    f.write(data)
+            except OSError as e:
+                return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
             logger.info(f'Upload: stored {len(data)} bytes at {path}')
             return JSONResponse({"status": "ok", "path": path, "size": len(data)})
 
@@ -239,7 +311,7 @@ class MCPMiddleware(AsyncMiddleware):
                     {"status": "error", "error": "missing ?filename= query parameter"},
                     status_code=400)
             path = middleware._dump_file(filename)
-            if path is None or not os.path.isfile(path):
+            if path is None or not _is_regular_file(path):
                 return JSONResponse({"status": "error", "error": "no such dump"}, status_code=404)
             return FileResponse(path, media_type='application/octet-stream', filename=filename)
 
@@ -1003,8 +1075,13 @@ class MCPMiddleware(AsyncMiddleware):
                     digest = hashlib.sha256()
                     total = 0
                     preview = b''
-                    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-                    with open(path, 'wb') as f:
+                    if name is None:
+                        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+                        out = open(path, 'wb')
+                    else:
+                        _private_dir(middleware._dump_dir)
+                        out = _create_private_file(path)
+                    with out as f:
                         while total < length:
                             chunk = _read_block(addr + total, min(65536, length - total))
                             f.write(chunk)
@@ -1174,7 +1251,7 @@ class MCPMiddleware(AsyncMiddleware):
         def memory_dump(name: str) -> bytes:
             """Raw bytes of a memory dump written by `read_memory` with `to_file`."""
             path = middleware._dump_file(name)
-            if path is None or not os.path.isfile(path):
+            if path is None or not _is_regular_file(path):
                 raise ValueError(f'No such dump: {name}')
             with open(path, 'rb') as f:
                 return f.read()

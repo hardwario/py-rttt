@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import socket
 import threading
 import time
@@ -788,7 +789,7 @@ def test_read_memory_dump_rejects_a_relative_path_with_directories(tmp_path):
     assert not (tmp_path / 'evil.bin').exists()
 
 
-def run_http_get(app, path, query=b''):
+def run_http_get(app, path, query=b'', host=b'127.0.0.1:8090'):
     """Drive an ASGI app with one GET request, return (status, body)."""
     sent = []
     requested = []
@@ -805,7 +806,7 @@ def run_http_get(app, path, query=b''):
         sent.append(message)
 
     scope = {'type': 'http', 'method': 'GET', 'path': path, 'raw_path': path.encode(),
-             'query_string': query, 'headers': [(b'host', b'127.0.0.1:8090')],
+             'query_string': query, 'headers': [(b'host', host)],
              'scheme': 'http', 'server': ('127.0.0.1', 8090), 'client': ('127.0.0.1', 1),
              'root_path': '', 'http_version': '1.1', 'asgi': {'version': '3.0'}}
     asyncio.run(app(scope, receive, send))
@@ -819,7 +820,7 @@ def test_download_serves_a_dump_and_nothing_else(tmp_path):
     asyncio.run(m._mcp.call_tool(
         'read_memory', {'address': '0x10000', 'length': 64, 'to_file': 'a.bin'}))
     (tmp_path / 'secret.txt').write_text('not yours')
-    app = m._mcp.streamable_http_app(stateless_http=True, host='127.0.0.1')
+    app = m._build_app()
 
     assert run_http_get(app, '/download', b'filename=a.bin') == (200, conn.jlink.image[:64])
     assert run_http_get(app, '/download', b'filename=../secret.txt')[0] == 404
@@ -914,3 +915,58 @@ def test_flash_replies_only_after_the_connector_returns(tmp_path):
     loop = None
     assert asyncio.run(run())['status'] == 'done'
     assert order == ['rtt restarted', 'replied']
+
+
+def test_download_refuses_a_symlink_in_the_dump_dir(tmp_path):
+    m, _ = make_mem_middleware(tmp_path)
+    os.makedirs(m._dump_dir)
+    (tmp_path / 'secret.txt').write_text('not yours')
+    os.symlink(tmp_path / 'secret.txt', os.path.join(m._dump_dir, 'link.bin'))
+
+    assert run_http_get(m._build_app(), '/download', b'filename=link.bin')[0] == 404
+
+
+def test_custom_routes_get_dns_rebinding_protection(tmp_path):
+    """The SDK checks Host on /mcp only; a page rebinding its name to
+    127.0.0.1 must not reach /download or /upload either."""
+    m, _ = make_mem_middleware(tmp_path)
+    asyncio.run(m._mcp.call_tool(
+        'read_memory', {'address': '0x10000', 'length': 16, 'to_file': 'a.bin'}))
+    app = m._build_app()
+
+    assert run_http_get(app, '/download', b'filename=a.bin', host=b'evil.example')[0] == 421
+    assert run_http_get(app, '/download', b'filename=a.bin', host=b'localhost:8090')[0] == 200
+    assert run_http_get(app, '/download', b'filename=a.bin', host=b'[::1]:8090')[0] == 200
+
+
+def test_non_loopback_bind_does_not_check_the_host(tmp_path):
+    # Bound to 0.0.0.0 the server is reached under whatever name the network
+    # gives it, so there is no allow-list to check against (same as the SDK).
+    m = MCPMiddleware(FakeMemConnector(), listen='0.0.0.0:0')
+    m._dump_dir = str(tmp_path / 'dumps')
+    asyncio.run(m._mcp.call_tool(
+        'read_memory', {'address': '0x10000', 'length': 16, 'to_file': 'a.bin'}))
+
+    assert run_http_get(m._build_app(), '/download', b'filename=a.bin', host=b'rttt.lan:8090')[0] == 200
+
+
+def test_private_dir_refuses_a_planted_symlink(tmp_path):
+    from rttt.connectors.mcp_server import _private_dir
+    target = tmp_path / 'attacker'
+    target.mkdir()
+    planted = tmp_path / 'rttt-dumps-8090'
+    os.symlink(target, planted)
+
+    with pytest.raises(OSError):
+        _private_dir(str(planted))
+
+
+def test_private_dir_tightens_a_directory_left_open(tmp_path):
+    # Directories made by earlier rttt versions got the default umask.
+    from rttt.connectors.mcp_server import _private_dir
+    d = tmp_path / 'rttt-uploads-8090'
+    d.mkdir(mode=0o755)
+    d.chmod(0o755)
+
+    _private_dir(str(d))
+    assert (d.stat().st_mode & 0o777) == 0o700
