@@ -331,9 +331,15 @@ def run_auth_request(token, auth_header):
     scope = {'type': 'http', 'method': 'GET', 'path': '/mcp', 'headers': headers,
              'query_string': b''}
     sent = []
+    requested = []
 
     async def receive():
-        return {'type': 'http.request', 'body': b'', 'more_body': False}
+        # The request once, then nothing: FileResponse listens for a client
+        # disconnect while it streams, and an answer every time would spin.
+        if not requested:
+            requested.append(True)
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+        await asyncio.Event().wait()
 
     async def send(message):
         sent.append(message)
@@ -694,3 +700,128 @@ def test_wait_for_connection_reports_the_disconnect_reason():
         assert 'VTref' in result['error']
 
     asyncio.run(run())
+
+
+class FakeMemConnector(FakeConnector):
+    """A connector whose J-Link reads from a fake memory image."""
+
+    class _JLink:
+        def __init__(self, base, image):
+            self.base = base
+            self.image = image
+
+        def memory_read(self, addr, num_units, nbits=8):
+            off = addr - self.base
+            return list(self.image[off:off + num_units])
+
+    def __init__(self, base=0x10000, image=bytes(range(256)) * 16):
+        super().__init__()
+        self.jlink = self._JLink(base, image)
+
+
+def make_mem_middleware(tmp_path):
+    conn = FakeMemConnector()
+    m = MCPMiddleware(conn, listen='127.0.0.1:0')
+    m._dump_dir = str(tmp_path / 'dumps')
+    return m, conn
+
+
+def test_read_memory_dump_by_name_is_downloadable(tmp_path):
+    m, conn = make_mem_middleware(tmp_path)
+
+    async def run():
+        return await m._mcp.call_tool(
+            'read_memory', {'address': '0x10010', 'length': 300, 'to_file': 'slot0.bin'})
+
+    result = asyncio.run(run())
+    assert not result.is_error
+    info = json.loads(result.content[0].text)
+    path = tmp_path / 'dumps' / 'slot0.bin'
+    assert info['status'] == 'ok'
+    assert info['file'] == str(path)
+    assert path.read_bytes() == conn.jlink.image[0x10:0x10 + 300]
+    # No HTTP request behind a direct call_tool, so the URL stays relative.
+    assert info['url'] == '/download?filename=slot0.bin'
+
+    link = result.content[1]
+    assert link.type == 'resource_link'
+    assert link.uri == 'rttt://dumps/slot0.bin'
+    assert link.size == 300
+
+
+def test_read_memory_dump_resource_returns_the_bytes(tmp_path):
+    m, conn = make_mem_middleware(tmp_path)
+
+    async def run():
+        await m._mcp.call_tool(
+            'read_memory', {'address': '0x10000', 'length': 32, 'to_file': 'hdr.bin'})
+        return await m._mcp.read_resource('rttt://dumps/hdr.bin')
+
+    contents = asyncio.run(run())
+    assert contents[0].content == conn.jlink.image[:32]
+
+
+def test_read_memory_dump_to_absolute_path_has_no_link(tmp_path):
+    m, _ = make_mem_middleware(tmp_path)
+    target = tmp_path / 'elsewhere.bin'
+
+    async def run():
+        return await m._mcp.call_tool(
+            'read_memory', {'address': '0x10000', 'length': 16, 'to_file': str(target)})
+
+    result = asyncio.run(run())
+    info = json.loads(result.content[0].text)
+    assert info['file'] == str(target)
+    assert 'url' not in info
+    assert len(result.content) == 1
+
+
+def test_read_memory_dump_rejects_a_relative_path_with_directories(tmp_path):
+    m, _ = make_mem_middleware(tmp_path)
+
+    async def run():
+        return tool_result(await m._mcp.call_tool(
+            'read_memory', {'address': '0x10000', 'length': 16, 'to_file': '../evil.bin'}))
+
+    result = asyncio.run(run())
+    assert result['status'] == 'error'
+    assert not (tmp_path / 'evil.bin').exists()
+
+
+def run_http_get(app, path, query=b''):
+    """Drive an ASGI app with one GET request, return (status, body)."""
+    sent = []
+    requested = []
+
+    async def receive():
+        # The request once, then nothing: FileResponse listens for a client
+        # disconnect while it streams, and an answer every time would spin.
+        if not requested:
+            requested.append(True)
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {'type': 'http', 'method': 'GET', 'path': path, 'raw_path': path.encode(),
+             'query_string': query, 'headers': [(b'host', b'127.0.0.1:8090')],
+             'scheme': 'http', 'server': ('127.0.0.1', 8090), 'client': ('127.0.0.1', 1),
+             'root_path': '', 'http_version': '1.1', 'asgi': {'version': '3.0'}}
+    asyncio.run(app(scope, receive, send))
+    status = next(m['status'] for m in sent if m['type'] == 'http.response.start')
+    body = b''.join(m.get('body', b'') for m in sent if m['type'] == 'http.response.body')
+    return status, body
+
+
+def test_download_serves_a_dump_and_nothing_else(tmp_path):
+    m, conn = make_mem_middleware(tmp_path)
+    asyncio.run(m._mcp.call_tool(
+        'read_memory', {'address': '0x10000', 'length': 64, 'to_file': 'a.bin'}))
+    (tmp_path / 'secret.txt').write_text('not yours')
+    app = m._mcp.streamable_http_app(stateless_http=True, host='127.0.0.1')
+
+    assert run_http_get(app, '/download', b'filename=a.bin') == (200, conn.jlink.image[:64])
+    assert run_http_get(app, '/download', b'filename=../secret.txt')[0] == 404
+    assert run_http_get(app, '/download', b'filename=missing.bin')[0] == 404
+    assert run_http_get(app, '/download')[0] == 400

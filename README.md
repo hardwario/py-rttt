@@ -403,7 +403,7 @@ use an SSH tunnel or a TLS reverse proxy for anything beyond a lab LAN.
 | `reset(halt)` | Reset the target; RTT re-attaches automatically (unless halting) |
 | `halt()` / `go()` | Stop / resume the target CPU |
 | `target_status()` | CPU halted flag and core identification |
-| `read_memory(address, length, width)` | Hexdump of RAM, peripherals or memory-mapped flash |
+| `read_memory(address, length, width, to_file)` | Hexdump of RAM, peripherals or memory-mapped flash; with `to_file` the bytes go to a file instead (see [Downloading Memory Dumps](#downloading-memory-dumps)) |
 | `write_memory(address, data, width)` | Write RAM or peripheral registers |
 | `write_flash(address, data)` | Program internal flash bytes (reset+halt, program, reboot) |
 | `read_registers()` | Core CPU registers (requires a halted target) |
@@ -477,8 +477,30 @@ curl -H 'Authorization: Bearer <TOKEN>' \
      --data-binary @fw.hex 'http://<host>:8090/upload?filename=fw.hex'
 ```
 
-> **Note:** without `--mcp-token` the MCP server and the upload endpoint have
-> no authentication. The default bind is `127.0.0.1`; set a token before
+### Downloading Memory Dumps
+
+Large memory reads should not travel through the AI's context. Pass a plain
+file name as `to_file` to `read_memory` and the bytes are written to a dump
+directory on the `rttt` machine; the reply carries only the path, size, SHA-256
+and a short preview, plus a `url` to fetch the file over the same port and a
+`rttt://dumps/<name>` resource link:
+
+```bash
+# read_memory(address="0x10000", length=65536, to_file="slot0.bin")
+# → {"status": "ok", "file": "/tmp/rttt-dumps-8090/slot0.bin", "length": 65536,
+#    "sha256": "…", "url": "http://<host>:8090/download?filename=slot0.bin", …}
+curl -o slot0.bin 'http://<host>:8090/download?filename=slot0.bin'
+```
+
+MCP clients can read the resource link instead of using HTTP; Claude Code
+saves the bytes to a local file and hands the AI only the path.
+
+`/download` serves only files from that dump directory. An absolute `to_file`
+path writes anywhere on the `rttt` machine instead, without a download link.
+With `--mcp-token` set, add the same `Authorization` header as for uploads.
+
+> **Note:** without `--mcp-token` the MCP server and the upload and download
+> endpoints have no authentication. The default bind is `127.0.0.1`; set a token before
 > exposing them with `--mcp-listen 0.0.0.0:8090` outside a trusted network
 > (see [Authentication](#authentication)).
 

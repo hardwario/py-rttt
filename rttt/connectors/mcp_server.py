@@ -6,8 +6,10 @@ import socket
 import tempfile
 import time
 from collections import deque
+from urllib.parse import quote
+import mcp_types
 from loguru import logger
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from rttt import __version__
 from rttt.connectors.base import Connector
 from rttt.connectors.middleware import AsyncMiddleware
@@ -34,6 +36,18 @@ class _BearerAuthMiddleware:
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+def _request_headers(ctx: Context):
+    """HTTP headers of the request behind a tool call, or None.
+
+    None on stdio and on a direct call_tool (the tests), where the context
+    raises instead of answering.
+    """
+    try:
+        return ctx.headers
+    except ValueError:
+        return None
 
 
 def _hexdump(addr: int, data: bytes) -> list:
@@ -82,6 +96,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._flash_done = None
         self._flash_activity = None
         self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
+        self._dump_dir = os.path.join(tempfile.gettempdir(), f'rttt-dumps-{self.port}')
         self._mcp = MCPServer(name, version=__version__, log_level="CRITICAL")
         self._register_tools()
         self._register_routes()
@@ -185,6 +200,31 @@ class MCPMiddleware(AsyncMiddleware):
                 f.write(data)
             logger.info(f'Upload: stored {len(data)} bytes at {path}')
             return JSONResponse({"status": "ok", "path": path, "size": len(data)})
+
+        @self._mcp.custom_route('/download', methods=['GET'])
+        async def download(request):
+            """Serve a memory dump written by `read_memory` with `to_file`.
+
+            Usage: curl -o slot0.bin 'http://host:port/download?filename=slot0.bin'
+            """
+            from starlette.responses import FileResponse, JSONResponse
+
+            filename = request.query_params.get('filename', '')
+            if not filename:
+                return JSONResponse(
+                    {"status": "error", "error": "missing ?filename= query parameter"},
+                    status_code=400)
+            path = middleware._dump_file(filename)
+            if path is None or not os.path.isfile(path):
+                return JSONResponse({"status": "error", "error": "no such dump"}, status_code=404)
+            return FileResponse(path, media_type='application/octet-stream', filename=filename)
+
+    def _dump_file(self, name: str):
+        """Path of dump `name` in the dump directory, or None when `name` is
+        not a plain file name (a dump is only ever served from there)."""
+        if not name or os.path.basename(name) != name or name in ('.', '..'):
+            return None
+        return os.path.join(self._dump_dir, name)
 
     def _leaf(self):
         """Descend the middleware chain to the leaf (J-Link) connector."""
@@ -849,9 +889,11 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do)
 
-        @self._mcp.tool()
-        async def read_memory(address: str, length: int = 64, width: int = 8,
-                              to_file: str = "") -> dict:
+        # The reply is a dict or [dict, resource link]; a union return would
+        # otherwise turn on structured output wrapped in {"result": ...}.
+        @self._mcp.tool(structured_output=False)
+        async def read_memory(ctx: Context, address: str, length: int = 64, width: int = 8,
+                              to_file: str = "") -> dict | list:
             """Read target memory (RAM, flash, peripherals) via J-Link.
 
             Works while the firmware is running. Flash is memory-mapped, so
@@ -863,12 +905,18 @@ class MCPMiddleware(AsyncMiddleware):
                     with `to_file`).
                 width: Access width in bits: 8, 16 or 32 (use 32 for
                     peripheral registers that ignore byte accesses).
-                to_file: Optional path to dump the raw bytes to instead of
+                to_file: Optional file to dump the raw bytes to instead of
                     returning them inline (use for large blocks — the reply
                     then carries only the path, size, sha256 and a short
-                    preview). A relative path is placed in the system temp
-                    directory. The path is resolved on the machine this
-                    server runs on.
+                    preview, never the data). Either a plain file name, e.g.
+                    "slot0.bin", or an absolute path on the machine this
+                    server runs on. A plain name goes to the server's dump
+                    directory, and the reply adds a `rttt://dumps/<name>`
+                    resource link plus a `url`. When you are not on the
+                    server's machine, read the resource link (clients such as
+                    Claude Code save the bytes to a local file rather than
+                    into the conversation) or download the `url`:
+                    `curl -o slot0.bin '<url>'`.
             """
             conn = middleware._leaf()
             try:
@@ -886,8 +934,13 @@ class MCPMiddleware(AsyncMiddleware):
                 return b''.join(int(u).to_bytes(unit, 'little') for u in units)[:n]
 
             if to_file:
-                path = to_file if os.path.isabs(to_file) else os.path.join(
-                    tempfile.gettempdir(), to_file)
+                if os.path.isabs(to_file):
+                    path, name = to_file, None
+                else:
+                    path, name = middleware._dump_file(to_file), to_file
+                    if path is None:
+                        return {"status": "error",
+                                "error": "to_file must be a plain file name or an absolute path"}
 
                 def _do():
                     digest = hashlib.sha256()
@@ -910,7 +963,16 @@ class MCPMiddleware(AsyncMiddleware):
                         "preview": _hexdump(addr, preview),
                     }
 
-                return await middleware._run_target_op(_do, timeout=30.0 + length / 50000)
+                result = await middleware._run_target_op(_do, timeout=30.0 + length / 50000)
+                if name is None or result["status"] != "ok":
+                    return result
+                query = f'/download?filename={quote(name)}'
+                host = (_request_headers(ctx) or {}).get('host')
+                result["url"] = f'http://{host}{query}' if host else query
+                link = mcp_types.ResourceLink(
+                    uri=f'rttt://dumps/{quote(name)}', name=name,
+                    mime_type='application/octet-stream', size=result["length"])
+                return [result, link]
 
             def _do():
                 data = _read_block(addr, length)
@@ -1051,6 +1113,15 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do)
 
+        @self._mcp.resource('rttt://dumps/{name}', mime_type='application/octet-stream')
+        def memory_dump(name: str) -> bytes:
+            """Raw bytes of a memory dump written by `read_memory` with `to_file`."""
+            path = middleware._dump_file(name)
+            if path is None or not os.path.isfile(path):
+                raise ValueError(f'No such dump: {name}')
+            with open(path, 'rb') as f:
+                return f.read()
+
         @self._mcp.prompt()
         def debug_device() -> str:
             """How to debug the connected embedded device with this server's tools."""
@@ -1082,6 +1153,11 @@ class MCPMiddleware(AsyncMiddleware):
                 "  PC/LR/SP tell you where the firmware is stuck.\n"
                 "- `read_memory`/`write_memory` access RAM and peripherals live;\n"
                 "  flash is memory-mapped so `read_memory` also reads flash.\n"
+                "- For more than a few hundred bytes pass `to_file` (e.g. \"slot0.bin\")\n"
+                "  to `read_memory`: the data goes to a file, not into the reply.\n"
+                "  When you are not on the server's machine, read the returned\n"
+                "  resource link (it saves to a local file) or curl the `url`, then\n"
+                "  inspect the file with local tools.\n"
                 "- `write_flash` programs internal flash bytes (device reboots).\n"
                 "\n"
                 "Troubleshooting:\n"
