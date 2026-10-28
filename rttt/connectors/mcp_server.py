@@ -61,6 +61,21 @@ def _hexdump(addr: int, data: bytes) -> list:
     return lines
 
 
+# Hints for the client, e.g. which calls it may run without asking. Every
+# tool reaches only the probe and its target, hence open_world_hint=False.
+_READ = mcp_types.ToolAnnotations(read_only_hint=True, open_world_hint=False)
+# Changes the session or CPU state, nothing that cannot be undone.
+_CONTROL = mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False,
+                                     open_world_hint=False)
+# Rewrites flash or memory, or reboots the firmware.
+_DESTRUCTIVE = mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=True,
+                                         open_world_hint=False)
+# Reads the target, but an absolute to_file can overwrite a file on the server.
+_DUMP = mcp_types.ToolAnnotations(read_only_hint=False, open_world_hint=False)
+# The device shell can do anything, so no claim either way.
+_TALK = mcp_types.ToolAnnotations(read_only_hint=False, open_world_hint=False)
+
+
 class MCPPortInUseError(Exception):
     """Raised when the MCP server port is already bound by another process."""
 
@@ -298,7 +313,7 @@ class MCPMiddleware(AsyncMiddleware):
     def _register_tools(self):
         middleware = self
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_TALK)
         async def send_command(command: str, timeout: float = 2.0) -> dict:
             """Send a shell command to the connected device.
 
@@ -357,14 +372,14 @@ class MCPMiddleware(AsyncMiddleware):
                     "error": str(e),
                 }
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_READ)
         def read_terminal(lines: int = 100) -> str:
             """Read recent terminal output. Returns JSON array with direction (in/out) and text."""
             # One content block: a list return becomes a block per line, and
             # clients may join blocks without a separator.
             return json.dumps(list(middleware._terminal_lines)[-lines:], indent=2)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_READ)
         def read_log(lines: int = -1, after_cursor: int = -1, pattern: str = "") -> str:
             """Read log output from the device, one line per log entry. Logs are
             kept in a ring buffer and can be read repeatedly. If you need buffer
@@ -396,7 +411,7 @@ class MCPMiddleware(AsyncMiddleware):
                     pass
             return '\n'.join(result)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_TALK)
         async def wait_for_state(pattern: str, timeout: float = 60.0,
                                  command: str = "", poll_interval: float = 5.0,
                                  source: str = "log") -> dict:
@@ -568,7 +583,7 @@ class MCPMiddleware(AsyncMiddleware):
             except asyncio.CancelledError:
                 raise
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_READ)
         def status() -> dict:
             """Get session statistics and transport connection state.
 
@@ -597,7 +612,7 @@ class MCPMiddleware(AsyncMiddleware):
                 "connections": dict(middleware._conn),
             }
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_READ)
         async def wait_for_connection(timeout: float = 30.0, source: str = "rtt") -> dict:
             """Wait until a transport is connected.
 
@@ -640,7 +655,7 @@ class MCPMiddleware(AsyncMiddleware):
                 except asyncio.TimeoutError:
                     pass
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_DESTRUCTIVE)
         async def flash(file_path: str, addr: int = 0) -> dict:
             """Flash a firmware file (.hex, .bin, .elf, .srec) to the target device.
 
@@ -714,7 +729,7 @@ class MCPMiddleware(AsyncMiddleware):
                 middleware._flash_done = None
                 middleware._flash_activity = None
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_CONTROL)
         async def reconnect(address: str = "") -> dict:
             """Restart the RTT connection to the device.
 
@@ -758,7 +773,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do, timeout=30.0)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_CONTROL)
         async def stop() -> dict:
             """Stop reading the device's RTT, keeping the probe held.
 
@@ -777,7 +792,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do, timeout=30.0)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_CONTROL)
         async def start() -> dict:
             """Start reading the device's RTT again after `stop`.
 
@@ -795,7 +810,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do, timeout=30.0)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_CONTROL)
         async def jlink_close() -> dict:
             """Release the J-Link so another tool can use it.
 
@@ -817,7 +832,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do, timeout=30.0)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_CONTROL)
         async def jlink_open() -> dict:
             """Take the J-Link back after `jlink_close` and start reading RTT.
 
@@ -837,7 +852,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do, timeout=30.0)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_DESTRUCTIVE)
         async def reset(halt: bool = False) -> dict:
             """Reset the target device.
 
@@ -852,7 +867,7 @@ class MCPMiddleware(AsyncMiddleware):
                 result["halted"] = halt
             return result
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_CONTROL)
         async def halt() -> dict:
             """Halt the target CPU. RTT keeps working (RAM stays accessible),
             but the firmware stops running until `go` or `reset`."""
@@ -864,7 +879,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_CONTROL)
         async def go() -> dict:
             """Resume the halted target CPU."""
             conn = middleware._leaf()
@@ -875,7 +890,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_READ)
         async def target_status() -> dict:
             """Get target CPU state: halted flag and core identification."""
             conn = middleware._leaf()
@@ -891,7 +906,7 @@ class MCPMiddleware(AsyncMiddleware):
 
         # The reply is a dict or [dict, resource link]; a union return would
         # otherwise turn on structured output wrapped in {"result": ...}.
-        @self._mcp.tool(structured_output=False)
+        @self._mcp.tool(structured_output=False, annotations=_DUMP)
         async def read_memory(ctx: Context, address: str, length: int = 64, width: int = 8,
                               to_file: str = "") -> dict | list:
             """Read target memory (RAM, flash, peripherals) via J-Link.
@@ -985,7 +1000,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_DESTRUCTIVE)
         async def write_memory(address: str, data: str = "", width: int = 8,
                                from_file: str = "") -> dict:
             """Write target memory (RAM or peripheral registers) via J-Link.
@@ -1025,7 +1040,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_DESTRUCTIVE)
         async def write_flash(address: str, data: str = "", from_file: str = "") -> dict:
             """Program internal flash at the given address via J-Link.
 
@@ -1074,7 +1089,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do, timeout=60.0)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_READ)
         async def read_registers() -> dict:
             """Read core CPU registers (R0-R15, PSR, MSP, PSP, ...).
 
@@ -1097,7 +1112,7 @@ class MCPMiddleware(AsyncMiddleware):
 
             return await middleware._run_target_op(_do)
 
-        @self._mcp.tool()
+        @self._mcp.tool(annotations=_READ)
         async def memory_zones() -> dict:
             """List memory zones the J-Link supports for the current target."""
             conn = middleware._leaf()

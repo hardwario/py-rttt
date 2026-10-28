@@ -825,3 +825,21 @@ def test_download_serves_a_dump_and_nothing_else(tmp_path):
     assert run_http_get(app, '/download', b'filename=../secret.txt')[0] == 404
     assert run_http_get(app, '/download', b'filename=missing.bin')[0] == 404
     assert run_http_get(app, '/download')[0] == 400
+
+
+def test_tool_annotations_tell_reads_from_writes():
+    m, _ = make_middleware()
+    tools = {t.name: t.annotations for t in asyncio.run(m._mcp.list_tools())}
+
+    for name in ('read_log', 'read_terminal', 'status', 'target_status',
+                 'memory_zones', 'read_registers', 'wait_for_connection'):
+        assert tools[name].read_only_hint is True, name
+    for name in ('flash', 'write_flash', 'write_memory', 'reset'):
+        assert tools[name].read_only_hint is False, name
+        assert tools[name].destructive_hint is True, name
+    for name in ('stop', 'start', 'jlink_close', 'jlink_open', 'halt', 'go', 'reconnect'):
+        assert tools[name].destructive_hint is False, name
+    # An absolute to_file can overwrite a file on the server.
+    assert tools['read_memory'].read_only_hint is False
+    # Every tool talks to the one probe, nothing beyond it.
+    assert all(a is not None and a.open_world_hint is False for a in tools.values())
