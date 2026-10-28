@@ -32,10 +32,9 @@ def make_middleware():
 
 
 def tool_result(result):
-    """Extract the tool's dict result from FastMCP call_tool output."""
-    if isinstance(result, dict):
-        return result
-    return json.loads(result[0].text)
+    """Extract the tool's dict result from MCPServer call_tool output."""
+    assert not result.is_error, result
+    return json.loads(result.content[0].text)
 
 
 def test_hexdump_format():

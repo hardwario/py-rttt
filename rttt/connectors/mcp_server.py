@@ -6,7 +6,8 @@ import tempfile
 import time
 from collections import deque
 from loguru import logger
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from rttt import __version__
 from rttt.connectors.base import Connector
 from rttt.connectors.middleware import AsyncMiddleware
 from rttt.event import Event, EventType
@@ -80,7 +81,7 @@ class MCPMiddleware(AsyncMiddleware):
         self._flash_done = None
         self._flash_activity = None
         self._upload_dir = os.path.join(tempfile.gettempdir(), f'rttt-uploads-{self.port}')
-        self._mcp = FastMCP(name, host=self.host, port=self.port, log_level="CRITICAL", stateless_http=True)
+        self._mcp = MCPServer(name, version=__version__, log_level="CRITICAL")
         self._register_tools()
         self._register_routes()
         self._server_task = None
@@ -109,12 +110,12 @@ class MCPMiddleware(AsyncMiddleware):
     async def _serve(self):
         """Run the Streamable HTTP server, optionally wrapped in bearer auth.
 
-        Mirrors FastMCP.run_streamable_http_async, which offers no hook to
-        wrap the ASGI app.
+        Mirrors MCPServer.run(transport="streamable-http"), which offers no
+        hook to wrap the ASGI app.
         """
         import uvicorn
 
-        app = self._mcp.streamable_http_app()
+        app = self._mcp.streamable_http_app(stateless_http=True, host=self.host)
         if self.token:
             app = _BearerAuthMiddleware(app, self.token)
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level='critical')
