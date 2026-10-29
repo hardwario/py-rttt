@@ -133,12 +133,47 @@ def _request_headers(ctx: Context):
         return None
 
 
-async def _report_progress(ctx: Context, progress: float, total: float, message: str) -> None:
+async def _report_progress(ctx: Context, progress: float, total: float | None, message: str) -> None:
     """Send a progress notification, unless no request is behind the call."""
     try:
         await ctx.report_progress(progress, total, message)
     except ValueError:
         pass
+
+
+class _FlashProgress:
+    """Turn the connector's flash events into MCP progress notifications.
+
+    J-Link reports each phase as its own 0-100 % and, once finished, repeats
+    every phase at 100 %; MCP requires the progress value to increase with
+    each notification. So the phases share one scale and anything that would
+    not move it forward is dropped. An external flash tool reports only its
+    output lines, which are counted instead.
+    """
+
+    # action: (start, span) on the 0-100 scale; Program takes most of the time
+    PHASES = {"Compare": (0, 10), "Program": (10, 80), "Verify": (90, 10)}
+
+    def __init__(self):
+        self._value = None
+        self._messages = {}
+
+    def step(self, data: dict):
+        """Return (progress, total, message) to report, or None."""
+        action = data.get("action")
+        # J-Link names the range only when it starts one; keep showing it.
+        message = data.get("message") or self._messages.get(action) or action
+        self._messages[action] = message
+        phase = self.PHASES.get(action)
+        if phase is not None and data.get("percentage") is not None:
+            percentage = min(max(data["percentage"], 0), 100)
+            value, total = phase[0] + phase[1] * percentage / 100, 100
+        else:
+            value, total = (self._value or 0) + 1, None
+        if self._value is not None and value <= self._value:
+            return None
+        self._value = value
+        return value, total, message
 
 
 def _hexdump(addr: int, data: bytes) -> list:
@@ -808,17 +843,19 @@ class MCPMiddleware(AsyncMiddleware):
             middleware._flash_progress = None
             middleware._flash_done = asyncio.Event()
             middleware._flash_activity = asyncio.Event()
-            reported = None
+            tracker = _FlashProgress()
+            seen = None
 
             async def report():
-                nonlocal reported
+                nonlocal seen
                 progress = middleware._flash_progress
-                if progress is None:
+                # Woken by handle() returning, not by a new event.
+                if progress is None or progress is seen:
                     return
-                step = (progress.get("percentage", 0), progress.get("message", ""))
-                if step != reported:
-                    reported = step
-                    await _report_progress(ctx, step[0], 100, step[1])
+                seen = progress
+                step = tracker.step(progress)
+                if step is not None:
+                    await _report_progress(ctx, *step)
 
             try:
                 loop = asyncio.get_event_loop()

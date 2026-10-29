@@ -888,8 +888,60 @@ def test_flash_reports_progress_to_the_client(tmp_path):
     loop = None
     result = asyncio.run(run())
     assert json.loads(result.content[0].text)['status'] == 'done'
-    # The repeated 10 % is not reported twice.
-    assert reports == [(10, 100, 'Programming'), (100, 100, 'Verifying')]
+    # The repeated 10 % is not reported twice; phases share one 0-100 scale.
+    assert reports == [(18, 100, 'Programming'), (100, 100, 'Verifying')]
+
+
+def test_flash_progress_only_moves_forward():
+    """Recorded from a real J-Link flash of an nRF9151: every phase counts
+    0-100 % on its own, ranges are named only when they start, and the end
+    repeats all phases at 100 %. MCP requires progress to always increase."""
+    from rttt.connectors.mcp_server import _FlashProgress
+
+    events = [
+        ('Compare', 'Comparing range 0x00000000 - 0x0000AFFF (44 KB)', 0),
+        ('Compare', None, 4),
+        ('Compare', None, 100),
+        ('Program', 'Programming range 0x00010000 - 0x00010FFF (4 KB)', 0),
+        ('Program', None, 50),
+        ('Program', None, 50),
+        ('Program', None, 100),
+        ('Verify', 'Verifying range 0x00010000 - 0x0002FFFF (128 KB)', 0),
+        ('Verify', None, 30),
+        ('Program', None, 100),
+        ('Verify', 'Verifying range 0x00030000 - 0x0004FFFF (128 KB)', 30),
+        ('Verify', None, 100),
+        ('Compare', None, 100),
+        ('Program', None, 100),
+        ('Verify', None, 100),
+    ]
+    tracker = _FlashProgress()
+    steps = [tracker.step({'status': 'progress', 'action': a, 'message': m, 'percentage': p})
+             for a, m, p in events]
+    reported = [s for s in steps if s is not None]
+
+    assert reported == [
+        (0, 100, 'Comparing range 0x00000000 - 0x0000AFFF (44 KB)'),
+        (0.4, 100, 'Comparing range 0x00000000 - 0x0000AFFF (44 KB)'),
+        (10, 100, 'Comparing range 0x00000000 - 0x0000AFFF (44 KB)'),
+        (50, 100, 'Programming range 0x00010000 - 0x00010FFF (4 KB)'),
+        (90, 100, 'Programming range 0x00010000 - 0x00010FFF (4 KB)'),
+        (93, 100, 'Verifying range 0x00010000 - 0x0002FFFF (128 KB)'),
+        (100, 100, 'Verifying range 0x00030000 - 0x0004FFFF (128 KB)'),
+    ]
+
+
+def test_flash_progress_counts_external_tool_lines():
+    """An external flash command reports its output lines, no percentage."""
+    from rttt.connectors.mcp_server import _FlashProgress
+
+    tracker = _FlashProgress()
+    lines = ['Parsing image file.', 'Erasing.', 'Programming.', 'Applying system reset.']
+    steps = [tracker.step({'status': 'progress', 'action': 'External', 'message': line})
+             for line in lines]
+
+    assert steps == [(1, None, lines[0]), (2, None, lines[1]),
+                     (3, None, lines[2]), (4, None, lines[3])]
 
 
 def test_flash_replies_only_after_the_connector_returns(tmp_path):
