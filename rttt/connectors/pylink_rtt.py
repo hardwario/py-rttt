@@ -1,5 +1,6 @@
 import os
 import pylink
+import re
 import shlex
 import subprocess
 import time
@@ -13,6 +14,65 @@ CONN_SOURCE = 'rtt'
 
 class ProbeError(Exception):
     """The J-Link probe or the target behind it cannot be reached."""
+
+
+class _FlashStats:
+    """Sum up what a J-Link flash download did, from its progress messages.
+
+    The DLL names each range it works on ('Programming range 0x00010000 -
+    0x00010FFF (4 KB)'). Sectors that already hold the right content are
+    compared but never programmed, so the two sums tell how much was written.
+    """
+
+    RANGE = re.compile(r'range 0x([0-9A-Fa-f]+) - 0x([0-9A-Fa-f]+)')
+
+    def __init__(self):
+        self._started = time.monotonic()
+        self._actions = set()
+        self._ranges = {}
+
+    def add(self, action, message):
+        self._actions.add(action)
+        m = self.RANGE.search(message or '')
+        if m:
+            ranges = self._ranges.setdefault(action, set())
+            span = (int(m[1], 16), int(m[2], 16))
+            if span not in ranges and action == 'Program':
+                logger.info(f'Flash: {message}')
+            ranges.add(span)
+
+    def _size(self, action):
+        # Ranges repeat for every percentage step and may overlap.
+        total, reach = 0, -1
+        for start, end in sorted(self._ranges.get(action, ())):
+            start = max(start, reach + 1)
+            if end >= start:
+                total += end - start + 1
+            reach = max(reach, end)
+        return total
+
+    def result(self):
+        duration = round(time.monotonic() - self._started, 1)
+        result = {"duration_s": duration}
+        compared = self._size('Compare') // 1024
+        programmed = self._size('Program') // 1024
+        if compared:
+            result["compared_kb"] = compared
+        if 'Program' not in self._actions and compared:
+            result["programmed_kb"] = 0
+            result["summary"] = f'Identical to the device, nothing written ({compared} KB compared, {duration} s)'
+        elif programmed and compared:
+            skipped = max(compared - programmed, 0)
+            result["programmed_kb"] = programmed
+            result["skipped_kb"] = skipped
+            result["summary"] = (f'Programmed {programmed} KB of {compared} KB in {duration} s '
+                                 f'({skipped} KB unchanged, skipped)')
+        elif programmed:
+            result["programmed_kb"] = programmed
+            result["summary"] = f'Programmed {programmed} KB in {duration} s'
+        else:
+            result["summary"] = f'Flashed in {duration} s'
+        return result
 
 
 class PyLinkRTTConnector(Connector):
@@ -560,9 +620,12 @@ class PyLinkRTTConnector(Connector):
 
             if self.flash_cmd:
                 try:
+                    stats = _FlashStats()
                     self._flash_external(file_path, addr)
+                    result = stats.result()
+                    logger.info(f'Flash: {result["summary"]}')
                     self._emit(Event(EventType.FLASH, {
-                        "status": "done", "file": file_path
+                        "status": "done", "file": file_path, **result
                     }))
                 except Exception as e:
                     logger.error(f'Flash: external command failed: {e}')
@@ -581,6 +644,7 @@ class PyLinkRTTConnector(Connector):
                 return
 
             progress_calls = 0
+            stats = _FlashStats()
 
             def on_progress(action, progress_string, percentage):
                 nonlocal progress_calls
@@ -589,6 +653,7 @@ class PyLinkRTTConnector(Connector):
                     action = action.decode('utf-8', errors='replace')
                 if isinstance(progress_string, bytes):
                     progress_string = progress_string.decode('utf-8', errors='replace')
+                stats.add(action, progress_string)
                 if action == "Erase":
                     return
                 self._emit(Event(EventType.FLASH, {
@@ -623,8 +688,10 @@ class PyLinkRTTConnector(Connector):
                 except pylink.errors.JLinkException as e:
                     logger.warning(f'InvalidateCache failed: {e}')
                 self.jlink.reset(ms=10, halt=False)
+                result = stats.result()
+                logger.info(f'Flash: {result["summary"]}')
                 self._emit(Event(EventType.FLASH, {
-                    "status": "done", "file": file_path
+                    "status": "done", "file": file_path, **result
                 }))
             except pylink.errors.JLinkException as e:
                 logger.error(f'J-Link: {e}')

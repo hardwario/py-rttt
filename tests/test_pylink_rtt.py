@@ -105,8 +105,11 @@ class FakeJLink:
     def flash_file(self, path, addr, on_progress=None):
         self.calls.append(('flash_file', path, addr))
         if on_progress:
-            for i, action in enumerate(self.flash_progress_actions):
-                on_progress(action, f'{action}...', i * 10)
+            # flash_progress: (action, message, percentage) as the DLL reports them
+            progress = getattr(self, 'flash_progress', None) or [
+                (action, f'{action}...', i * 10) for i, action in enumerate(self.flash_progress_actions)]
+            for action, message, percentage in progress:
+                on_progress(action, message, percentage)
         return 0
 
 
@@ -215,6 +218,57 @@ def test_flash_success(tmp_path, virtual_clock):
     assert ('reset', True) in jlink.calls
     assert ('reset', False) in jlink.calls
     assert ('exec', 'InvalidateCache') in jlink.calls
+
+
+def test_flash_reports_what_was_written(tmp_path, virtual_clock):
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+    jlink = FakeJLink()
+    jlink.flash_progress = [
+        ('Compare', 'Comparing range 0x00000000 - 0x0001FFFF (128 KB)', 0),
+        ('Compare', 'Comparing range 0x00000000 - 0x0001FFFF (128 KB)', 50),
+        ('Compare', 'Comparing range 0x00020000 - 0x0003FFFF (128 KB)', 100),
+        ('Erase', 'Erasing range 0x00010000 - 0x00011FFF (8 KB)', 100),
+        ('Program', 'Programming range 0x00010000 - 0x00010FFF (4 KB)', 50),
+        ('Program', 'Programming range 0x00010000 - 0x00010FFF (4 KB)', 100),
+        ('Program', 'Programming range 0x00011000 - 0x00011FFF (4 KB)', 100),
+        ('Verify', 'Verifying range 0x00010000 - 0x00011FFF (8 KB)', 100),
+    ]
+    conn, events = make_connector(jlink)
+    conn.flash(str(fw))
+
+    done = flash_events(events)[-1]
+    assert done['status'] == 'done'
+    assert (done['compared_kb'], done['programmed_kb'], done['skipped_kb']) == (256, 8, 248)
+    assert done['summary'].startswith('Programmed 8 KB of 256 KB in ')
+    assert 'duration_s' in done
+
+
+def test_flash_of_an_identical_image_says_nothing_was_written(tmp_path, virtual_clock):
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+    jlink = FakeJLink()
+    jlink.flash_progress = [
+        ('Compare', 'Comparing range 0x00000000 - 0x0001FFFF (128 KB)', 100),
+    ]
+    conn, events = make_connector(jlink)
+    conn.flash(str(fw))
+
+    done = flash_events(events)[-1]
+    assert done['programmed_kb'] == 0
+    assert done['summary'].startswith('Identical to the device, nothing written (128 KB compared')
+
+
+def test_flash_without_ranges_reports_only_the_duration(tmp_path, virtual_clock):
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+    jlink = FakeJLink()
+    conn, events = make_connector(jlink)
+    conn.flash(str(fw))
+
+    done = flash_events(events)[-1]
+    assert done['summary'].startswith('Flashed in ')
+    assert 'programmed_kb' not in done, 'no range was reported, so nothing is known'
 
 
 def test_flash_zero_progress_is_error(tmp_path, virtual_clock):

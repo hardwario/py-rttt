@@ -825,6 +825,13 @@ class MCPMiddleware(AsyncMiddleware):
             `curl --data-binary @fw.hex 'http://<host>:<port>/upload?filename=fw.hex'`
             — the JSON response contains the server-side `path` to pass here.
 
+            The result says what the flash did: `summary` in words, plus
+            `duration_s` and, where the probe reports it, `compared_kb`,
+            `programmed_kb` and `skipped_kb`. Sectors that already match are
+            skipped, so a file identical to the device writes nothing. The
+            sizes are what the probe reports; it may rewrite a few sectors
+            that did not change.
+
             Args:
                 file_path: Absolute path to the firmware file.
                 addr: Start address for flashing (default 0, ignored for .hex files).
@@ -904,8 +911,10 @@ class MCPMiddleware(AsyncMiddleware):
                     "file": file_path,
                     "events": middleware._flash_events,
                 }
-                if "error" in final:
-                    result["error"] = final["error"]
+                # What the flash did: how long it took and how much it wrote.
+                for key in ("summary", "duration_s", "compared_kb", "programmed_kb", "skipped_kb", "error"):
+                    if key in final:
+                        result[key] = final[key]
                 return result
 
             except Exception as e:

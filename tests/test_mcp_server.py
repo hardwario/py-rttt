@@ -898,7 +898,9 @@ def test_flash_reports_progress_to_the_client(tmp_path):
                          {'status': 'progress', 'action': 'Program', 'message': 'Programming', 'percentage': 10},
                          {'status': 'progress', 'action': 'Program', 'message': 'Programming', 'percentage': 10},
                          {'status': 'progress', 'action': 'Verify', 'message': 'Verifying', 'percentage': 100},
-                         {'status': 'done'}):
+                         {'status': 'done', 'summary': 'Programmed 8 KB of 256 KB in 12.3 s',
+                          'duration_s': 12.3, 'compared_kb': 256, 'programmed_kb': 8,
+                          'skipped_kb': 248}):
                 asyncio.run_coroutine_threadsafe(
                     m._process(Event(EventType.FLASH, data)), loop).result()
 
@@ -917,7 +919,11 @@ def test_flash_reports_progress_to_the_client(tmp_path):
 
     loop = None
     result = asyncio.run(run())
-    assert json.loads(result.content[0].text)['status'] == 'done'
+    payload = json.loads(result.content[0].text)
+    assert payload['status'] == 'done'
+    # What was written is part of the answer, not buried in the events.
+    assert payload['summary'] == 'Programmed 8 KB of 256 KB in 12.3 s'
+    assert (payload['programmed_kb'], payload['skipped_kb'], payload['duration_s']) == (8, 248, 12.3)
     # The repeated 10 % is not reported twice; phases share one 0-100 scale.
     assert reports == [(18, 100, 'Programming'), (100, 100, 'Verifying')]
 
