@@ -113,6 +113,42 @@ class FakeJLink:
         return 0
 
 
+# Progress callbacks recorded from a J-Link flash of an nRF9151 (KSB), one
+# byte changed at 0x7C000: compare in blocks, erase the 32 KB block that
+# differs, program back what it holds. Finished phases keep repeating.
+KSB_ONE_BYTE_FLASH = [
+    ('Compare', 'Comparing range 0x00010000 - 0x0002FFFF (128 KB)', 0),
+    ('Compare', None, 14),
+    ('Compare', 'Comparing range 0x00030000 - 0x0004FFFF (128 KB)', 14),
+    ('Compare', 'Comparing range 0x00050000 - 0x0006FFFF (128 KB)', 28),
+    ('Compare', 'Comparing range 0x00070000 - 0x0007FFFF (64 KB)', 42),
+    ('Compare', 'Comparing range 0x00078000 - 0x0007FFFF (32 KB)', 53),
+    ('Compare', None, 103),
+    ('Erase', 'Erasing range 0x00078000 - 0x0007FFFF (8 sectors, 32 KB)', 0),
+    ('Erase', None, 100),
+    ('Program', 'Programming range 0x00078000 - 0x00078FFF (4 KB)', 0),
+    ('Program', None, 12),
+    ('Erase', None, 100),
+    ('Program', 'Programming range 0x00079000 - 0x00079FFF (4 KB)', 12),
+    ('Program', None, 25),
+    ('Erase', None, 100),
+    ('Program', 'Programming range 0x0007A000 - 0x0007AFFF (4 KB)', 25),
+    ('Program', None, 37),
+    ('Erase', None, 100),
+    ('Program', 'Programming range 0x0007C000 - 0x0007CFFF (4 KB)', 37),
+    ('Program', None, 50),
+    ('Erase', None, 100),
+    ('Program', 'Programming range 0x0007F000 - 0x0007FFFF (4 KB)', 50),
+    ('Program', None, 62),
+    ('Verify', 'Verifying range 0x00078000 - 0x0007FFFF (32 KB)', 0),
+    ('Verify', None, 100),
+    ('Compare', None, 100),
+    ('Erase', None, 100),
+    ('Program', None, 100),
+    ('Verify', None, 100),
+]
+
+
 @pytest.fixture
 def virtual_clock(monkeypatch):
     """Replace time.monotonic/time.sleep in the module with a virtual clock."""
@@ -242,6 +278,26 @@ def test_flash_reports_what_was_written(tmp_path, virtual_clock):
     assert (done['compared_kb'], done['programmed_kb'], done['skipped_kb']) == (256, 8, 248)
     assert done['summary'].startswith('Programmed 8 KB of 256 KB in ')
     assert 'duration_s' in done
+
+
+def test_flash_shows_the_erase_and_never_goes_back_a_phase(tmp_path, virtual_clock):
+    fw = tmp_path / 'fw.hex'
+    fw.write_bytes(b':00000001FF\n')
+    jlink = FakeJLink()
+    jlink.flash_progress = KSB_ONE_BYTE_FLASH
+    conn, events = make_connector(jlink)
+    conn.flash(str(fw))
+
+    progress = [e for e in flash_events(events) if e['status'] == 'progress']
+    actions = [e['action'] for e in progress]
+    assert 'Erase' in actions, 'erasing a block takes most of a small flash; it has to show'
+    order = ['Compare', 'Erase', 'Program', 'Verify']
+    ranks = [order.index(a) for a in actions]
+    assert ranks == sorted(ranks), f'the progress went back a phase: {actions}'
+
+    done = flash_events(events)[-1]
+    assert (done['compared_kb'], done['erased_kb'], done['programmed_kb'], done['skipped_kb']) == (448, 32, 20, 416)
+    assert '(32 KB erased, 416 KB unchanged, skipped)' in done['summary']
 
 
 def test_flash_of_an_identical_image_says_nothing_was_written(tmp_path, virtual_clock):

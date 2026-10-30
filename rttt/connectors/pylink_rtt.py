@@ -11,6 +11,9 @@ from rttt.event import Event, EventType, conn_event
 
 CONN_SOURCE = 'rtt'
 
+# The phases of a J-Link flash download, in the order they run.
+FLASH_PHASES = {'Compare': 0, 'Erase': 1, 'Program': 2, 'Verify': 3}
+
 
 class ProbeError(Exception):
     """The J-Link probe or the target behind it cannot be reached."""
@@ -20,8 +23,10 @@ class _FlashStats:
     """Sum up what a J-Link flash download did, from its progress messages.
 
     The DLL names each range it works on ('Programming range 0x00010000 -
-    0x00010FFF (4 KB)'). Sectors that already hold the right content are
-    compared but never programmed, so the two sums tell how much was written.
+    0x00010FFF (4 KB)'). It compares the image block by block, erases each
+    block that differs and programs back whatever that block holds, so the
+    programmed sum can exceed what actually changed. Blocks that match are
+    neither erased nor programmed.
     """
 
     RANGE = re.compile(r'range 0x([0-9A-Fa-f]+) - 0x([0-9A-Fa-f]+)')
@@ -55,18 +60,22 @@ class _FlashStats:
         duration = round(time.monotonic() - self._started, 1)
         result = {"duration_s": duration}
         compared = self._size('Compare') // 1024
+        erased = self._size('Erase') // 1024
         programmed = self._size('Program') // 1024
         if compared:
             result["compared_kb"] = compared
-        if 'Program' not in self._actions and compared:
+        if erased:
+            result["erased_kb"] = erased
+        if not self._actions & {'Erase', 'Program'} and compared:
             result["programmed_kb"] = 0
             result["summary"] = f'Identical to the device, nothing written ({compared} KB compared, {duration} s)'
         elif programmed and compared:
-            skipped = max(compared - programmed, 0)
+            skipped = max(compared - max(erased, programmed), 0)
             result["programmed_kb"] = programmed
             result["skipped_kb"] = skipped
+            erased_note = f'{erased} KB erased, ' if erased else ''
             result["summary"] = (f'Programmed {programmed} KB of {compared} KB in {duration} s '
-                                 f'({skipped} KB unchanged, skipped)')
+                                 f'({erased_note}{skipped} KB unchanged, skipped)')
         elif programmed:
             result["programmed_kb"] = programmed
             result["summary"] = f'Programmed {programmed} KB in {duration} s'
@@ -645,17 +654,25 @@ class PyLinkRTTConnector(Connector):
 
             progress_calls = 0
             stats = _FlashStats()
+            phase = -1
 
             def on_progress(action, progress_string, percentage):
-                nonlocal progress_calls
+                nonlocal progress_calls, phase
                 progress_calls += 1
                 if isinstance(action, bytes):
                     action = action.decode('utf-8', errors='replace')
                 if isinstance(progress_string, bytes):
                     progress_string = progress_string.decode('utf-8', errors='replace')
                 stats.add(action, progress_string)
-                if action == "Erase":
-                    return
+                # The phases run in this order, but the DLL keeps reporting
+                # finished ones at 100 %: an Erase between every programmed
+                # range, and all four once more at the end. Passed on, they
+                # would make the progress bar jump back and forth.
+                rank = FLASH_PHASES.get(action)
+                if rank is not None:
+                    if rank < phase:
+                        return
+                    phase = rank
                 self._emit(Event(EventType.FLASH, {
                     "status": "progress", "action": action,
                     "message": progress_string,

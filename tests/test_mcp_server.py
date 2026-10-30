@@ -925,7 +925,7 @@ def test_flash_reports_progress_to_the_client(tmp_path):
     assert payload['summary'] == 'Programmed 8 KB of 256 KB in 12.3 s'
     assert (payload['programmed_kb'], payload['skipped_kb'], payload['duration_s']) == (8, 248, 12.3)
     # The repeated 10 % is not reported twice; phases share one 0-100 scale.
-    assert reports == [(18, 100, 'Programming'), (100, 100, 'Verifying')]
+    assert reports == [(54, 100, 'Programming'), (100, 100, 'Verifying')]
 
 
 def test_flash_progress_only_moves_forward():
@@ -961,9 +961,36 @@ def test_flash_progress_only_moves_forward():
         (0.4, 100, 'Comparing range 0x00000000 - 0x0000AFFF (44 KB)'),
         (10, 100, 'Comparing range 0x00000000 - 0x0000AFFF (44 KB)'),
         (50, 100, 'Programming range 0x00010000 - 0x00010FFF (4 KB)'),
+        (70, 100, 'Programming range 0x00010000 - 0x00010FFF (4 KB)'),
         (90, 100, 'Programming range 0x00010000 - 0x00010FFF (4 KB)'),
+        (90.1, 100, 'Verifying range 0x00010000 - 0x0002FFFF (128 KB)'),
         (93, 100, 'Verifying range 0x00010000 - 0x0002FFFF (128 KB)'),
         (100, 100, 'Verifying range 0x00030000 - 0x0004FFFF (128 KB)'),
+    ]
+
+
+def test_flash_progress_shows_the_erase():
+    """Erasing gets its own part of the scale, between Compare and Program."""
+    from rttt.connectors.mcp_server import _FlashProgress
+
+    tracker = _FlashProgress()
+    steps = [tracker.step({'status': 'progress', 'action': a, 'message': m, 'percentage': p})
+             for a, m, p in [
+                 ('Compare', 'Comparing range 0x00010000 - 0x0007FFFF (448 KB)', 100),
+                 ('Erase', 'Erasing range 0x00078000 - 0x0007FFFF (8 sectors, 32 KB)', 0),
+                 ('Erase', None, 50),
+                 ('Erase', None, 100),
+                 ('Program', 'Programming range 0x00078000 - 0x00078FFF (4 KB)', 0),
+             ]]
+
+    assert steps == [
+        (10, 100, 'Comparing range 0x00010000 - 0x0007FFFF (448 KB)'),
+        # Erase 0 % sits where Compare ended; it is reported just past it,
+        # so the client learns the erase began.
+        (10.1, 100, 'Erasing range 0x00078000 - 0x0007FFFF (8 sectors, 32 KB)'),
+        (30, 100, 'Erasing range 0x00078000 - 0x0007FFFF (8 sectors, 32 KB)'),
+        (50, 100, 'Erasing range 0x00078000 - 0x0007FFFF (8 sectors, 32 KB)'),
+        (50.1, 100, 'Programming range 0x00078000 - 0x00078FFF (4 KB)'),
     ]
 
 

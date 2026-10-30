@@ -151,11 +151,13 @@ class _FlashProgress:
     output lines, which are counted instead.
     """
 
-    # action: (start, span) on the 0-100 scale; Program takes most of the time
-    PHASES = {"Compare": (0, 10), "Program": (10, 80), "Verify": (90, 10)}
+    # action: (start, span) on the 0-100 scale. Erasing a sector takes far
+    # longer than programming it, so both get a large share.
+    PHASES = {"Compare": (0, 10), "Erase": (10, 40), "Program": (50, 40), "Verify": (90, 10)}
 
     def __init__(self):
         self._value = None
+        self._phase_start = -1
         self._messages = {}
 
     def step(self, data: dict):
@@ -171,7 +173,14 @@ class _FlashProgress:
         else:
             value, total = (self._value or 0) + 1, None
         if self._value is not None and value <= self._value:
-            return None
+            # A later phase starting at 0 % lands where the previous one
+            # ended. Nudge it forward, so the client sees it begin rather than
+            # only end -- an erase can take seconds.
+            if phase is None or phase[0] <= self._phase_start:
+                return None
+            value = self._value + 0.1
+        if phase is not None:
+            self._phase_start = phase[0]
         self._value = value
         return value, total, message
 
@@ -827,10 +836,11 @@ class MCPMiddleware(AsyncMiddleware):
 
             The result says what the flash did: `summary` in words, plus
             `duration_s` and, where the probe reports it, `compared_kb`,
-            `programmed_kb` and `skipped_kb`. Sectors that already match are
-            skipped, so a file identical to the device writes nothing. The
-            sizes are what the probe reports; it may rewrite a few sectors
-            that did not change.
+            `erased_kb`, `programmed_kb` and `skipped_kb`. Blocks that already
+            match are skipped, so a file identical to the device writes
+            nothing. A block that differs is erased whole (32 KB on an nRF91)
+            and everything it holds is programmed back, so `programmed_kb` can
+            exceed what changed.
 
             Args:
                 file_path: Absolute path to the firmware file.
@@ -912,7 +922,8 @@ class MCPMiddleware(AsyncMiddleware):
                     "events": middleware._flash_events,
                 }
                 # What the flash did: how long it took and how much it wrote.
-                for key in ("summary", "duration_s", "compared_kb", "programmed_kb", "skipped_kb", "error"):
+                for key in ("summary", "duration_s", "compared_kb", "erased_kb", "programmed_kb", "skipped_kb",
+                            "error"):
                     if key in final:
                         result[key] = final[key]
                 return result
