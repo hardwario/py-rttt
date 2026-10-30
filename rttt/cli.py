@@ -2,7 +2,6 @@ import os
 import sys
 import click
 import time
-import pylink
 from dataclasses import dataclass, field
 from loguru import logger
 from rttt import __version__ as version
@@ -11,6 +10,7 @@ from rttt.connectors import (
     SubstitutionMiddleware, DemoConnector,
 )
 from rttt.connectors.demo import DEMO_SERIAL
+from rttt.connectors.pylink_rtt import ProbeError
 from rttt.console import Console
 from rttt.shell_trust import ensure_shell_trust
 from rttt.utils import load_configs
@@ -120,9 +120,9 @@ def _prepare_tty_for_console():
 
 
 def _run_headless(connector, mcp_listen):
-    connector.open()
-    click.echo(f'MCP server running on {mcp_listen}, press Ctrl+C to exit.')
     try:
+        connector.open()
+        click.echo(f'MCP server running on {mcp_listen}, press Ctrl+C to exit.')
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
@@ -188,54 +188,12 @@ def cli(app: CliContext, serial, demo, device, speed, reset, flash_cmd, address,
     if not device:
         device = click.prompt('Device')
 
-    jlink = pylink.JLink()
-    try:
-        jlink.open(serial_no=serial)
-        # Suppress DLL GUI dialogs (flash progress window, firmware update
-        # prompts) — they have no place in a TUI/headless session.
-        jlink.disable_dialog_boxes()
-        jlink.set_speed(speed)
-        jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
-    except pylink.errors.JLinkException as e:
-        raise click.ClickException(f'J-Link: {e}') from e
-
-    for label, getter in (
-        ('dll version', lambda: jlink.version),
-        ('dll compile_date', lambda: jlink.compile_date),
-        ('dll path', lambda: jlink._library._path),
-        ('serial_number', lambda: jlink.serial_number),
-        ('firmware_version', lambda: jlink.firmware_version),
-        ('firmware_outdated', jlink.firmware_outdated),
-        ('firmware_newer', jlink.firmware_newer),
-    ):
-        try:
-            logger.info(f'J-Link {label}: {getter()}')
-        except Exception:
-            pass
-
-    for attempt in range(3):
-        try:
-            jlink.connect(device)
-            break
-        except pylink.errors.JLinkException as e:
-            if attempt < 2:
-                logger.warning(f'J-Link: connect attempt {attempt + 1} failed: {e}, retrying...')
-                time.sleep(0.5)
-            else:
-                raise click.ClickException(f'J-Link: {e}') from e
-
-    if reset:
-        try:
-            # halt=False leaves the firmware running; there is no go() in
-            # pylink to follow a halting reset with.
-            jlink.reset(halt=False)
-        except pylink.errors.JLinkException as e:
-            raise click.ClickException(f'J-Link: {e}') from e
-        time.sleep(1)
-
-    connector = PyLinkRTTConnector(jlink, terminal_buffer, logger_buffer, latency, block_address=address,
-                                   flash_cmd=flash_cmd, device=device, serial=serial, speed=speed,
-                                   auto_reconnect=auto_reconnect)
+    # The connector opens the probe itself in open(), so it can also reopen it
+    # after the USB cable was pulled.
+    connector = PyLinkRTTConnector(terminal_buffer=terminal_buffer, logger_buffer=logger_buffer,
+                                   latency=latency, block_address=address, flash_cmd=flash_cmd,
+                                   device=device, serial=serial, speed=speed,
+                                   auto_reconnect=auto_reconnect, reset_on_open=reset)
 
     connector = _wrap_common_middleware(
         connector, substitutions=substitutions, app=app, mcp=mcp,
@@ -243,13 +201,17 @@ def cli(app: CliContext, serial, demo, device, speed, reset, flash_cmd, address,
         device=device, serial=serial,
     )
 
-    if headless:
-        _run_headless(connector, mcp_listen)
-        return
+    # The probe is opened by connector.open(), which runs inside both of these.
+    try:
+        if headless:
+            _run_headless(connector, mcp_listen)
+            return
 
-    _prepare_tty_for_console()
-    console = Console(connector, history_file=history_file, max_lines=max_lines)
-    console.run()
+        _prepare_tty_for_console()
+        console = Console(connector, history_file=history_file, max_lines=max_lines)
+        console.run()
+    except ProbeError as e:
+        raise click.ClickException(str(e)) from e
 
 
 def main():

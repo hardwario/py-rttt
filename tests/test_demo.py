@@ -104,7 +104,7 @@ def test_cli_serial_demo_skips_jlink(monkeypatch, tmp_path):
 
     monkeypatch.setattr('rttt.cli.Console', FakeConsole)
     # If anyone opens JLink, fail hard.
-    monkeypatch.setattr('rttt.cli.pylink.JLink', mock.Mock(side_effect=AssertionError('J-Link opened')))
+    monkeypatch.setattr('rttt.connectors.pylink_rtt.pylink.JLink', mock.Mock(side_effect=AssertionError('J-Link opened')))
 
     runner = CliRunner()
     result = runner.invoke(
@@ -127,7 +127,7 @@ def test_cli_demo_flag_alias(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr('rttt.cli.Console', FakeConsole)
-    monkeypatch.setattr('rttt.cli.pylink.JLink', mock.Mock(side_effect=AssertionError('J-Link')))
+    monkeypatch.setattr('rttt.connectors.pylink_rtt.pylink.JLink', mock.Mock(side_effect=AssertionError('J-Link')))
 
     runner = CliRunner()
     result = runner.invoke(

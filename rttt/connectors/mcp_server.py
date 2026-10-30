@@ -948,10 +948,15 @@ class MCPMiddleware(AsyncMiddleware):
                 # Same shape as the connector's own reconnect: stopping here is
                 # only so a start can follow, and rtt_start cannot succeed over
                 # a stale connection to the target.
-                conn.stop(report=False)
+                try:
+                    conn.stop(report=False)
+                except Exception as e:
+                    # A probe that is gone cannot stop RTT; reconnecting is
+                    # exactly what gets it back.
+                    logger.warning(f'Reconnect: stop failed: {e}')
                 if getattr(conn, 'device', None):
                     try:
-                        conn._reopen_jlink()
+                        conn.reconnect_probe()
                     except Exception as e:
                         logger.warning(f'Reconnect: reopening the probe failed: {e}')
                 conn.start()
@@ -1003,7 +1008,8 @@ class MCPMiddleware(AsyncMiddleware):
             `nrfjprog`, `JLinkExe` or `west flash` needs this first. Stops RTT
             on the way out; call `jlink_open` to take the probe back.
 
-            Does not touch the firmware — it keeps running.
+            Does not touch the firmware — it keeps running. Taking the probe
+            back later can reset it, though: see `jlink_open`.
             """
             conn = middleware._leaf()
 
@@ -1012,7 +1018,7 @@ class MCPMiddleware(AsyncMiddleware):
                 # Reported as 'released' rather than 'stopped': the probe is
                 # gone too, so nothing here can reach the target at all.
                 conn.suspend(status='released')
-                conn.jlink.close()
+                conn.close_probe()
                 return {"was_reading": was_reading}
 
             return await middleware._run_target_op(_do, timeout=30.0)
@@ -1021,7 +1027,10 @@ class MCPMiddleware(AsyncMiddleware):
         async def jlink_open() -> dict:
             """Take the J-Link back after `jlink_close` and start reading RTT.
 
-            Fails while another process still holds the probe.
+            Fails while another process still holds the probe. On an nRF91 a
+            freshly opened probe may reset the target, so the firmware reboots
+            (nRF9151 errata 36: the debug port locks while the CPU sleeps). A
+            firmware that keeps the CPU awake, or opens a debug window, avoids it.
             """
             conn = middleware._leaf()
 
@@ -1030,9 +1039,17 @@ class MCPMiddleware(AsyncMiddleware):
                     return {"status": "error",
                             "error": "No device configured, cannot reopen the probe"}
                 conn.resume()
-                conn._reopen_jlink()
-                if not conn.is_running:
-                    conn.start()
+                # Called without jlink_close the session may still be reading.
+                # Stop it first: the probe may be reopened under it, and a new
+                # session needs its own rtt_start.
+                try:
+                    conn.stop(report=False)
+                except Exception as e:
+                    logger.warning(f'jlink_open: stop failed: {e}')
+                # A probe still held is only reconnected, which keeps the
+                # firmware running.
+                conn.reconnect_probe()
+                conn.start()
                 return {"reading": conn.is_running}
 
             return await middleware._run_target_op(_do, timeout=30.0)

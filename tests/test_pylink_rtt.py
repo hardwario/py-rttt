@@ -3,7 +3,7 @@ import threading
 import os
 import pytest
 import rttt.connectors.pylink_rtt as pylink_rtt_module
-from rttt.connectors.pylink_rtt import PyLinkRTTConnector
+from rttt.connectors.pylink_rtt import PyLinkRTTConnector, ProbeError
 from rttt.event import Event, EventType
 
 
@@ -27,6 +27,9 @@ class FakeJLink:
 
     def close(self):
         self.calls.append('close')
+
+    def opened(self):
+        return True
 
     def disable_dialog_boxes(self):
         pass
@@ -1171,3 +1174,293 @@ def test_flash_does_not_report_a_disconnect(tmp_path, virtual_clock):
     statuses = [e.data.get('status') for e in events if e.type == EventType.CONN]
     assert 'disconnected' not in statuses, \
         f'flashing reported a disconnect: {statuses}'
+
+
+class PluggableJLink(FakeJLink):
+    """FakeJLink with pylink's open/close bookkeeping and a USB cable.
+
+    pylink counts open() calls: open() on a handle that is already open only
+    bumps the count, and only the last close() lets go of the probe. Pulling
+    the cable kills the session for good while the handle still counts as
+    open, so only a real close() and open() gets a working one back.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._open_refcount = 0
+        self.plugged = True
+        self.sessions = 0
+        self.live = False
+        self.fresh = False
+        self.target_resets = 0
+
+    def open(self, serial_no=None):
+        import pylink as pylink_mod
+        self.calls.append(('open', serial_no))
+        if self._open_refcount > 0:
+            self._open_refcount += 1
+            return
+        if not self.plugged:
+            raise pylink_mod.errors.JLinkException(
+                f'No emulator with serial number {serial_no} found.')
+        self._open_refcount = 1
+        self.sessions += 1
+        self.live = True
+        self.fresh = True
+
+    def close(self):
+        self.calls.append('close')
+        if self._open_refcount == 0:
+            return
+        self._open_refcount -= 1
+        if self._open_refcount == 0:
+            self.live = False
+
+    def opened(self):
+        return self._open_refcount > 0
+
+    def unplug(self):
+        self.plugged = False
+        self.live = False
+
+    def _check(self):
+        import pylink as pylink_mod
+        if not self.live:
+            raise pylink_mod.errors.JLinkException('J-Link connection has been lost.')
+
+    def connect(self, device):
+        self._check()
+        super().connect(device)
+        # On an nRF91 the first connect of a new session resets the target;
+        # connecting again on a live session leaves the firmware running.
+        if self.fresh:
+            self.fresh = False
+            self.target_resets += 1
+
+    def rtt_start(self, block_address=None):
+        self._check()
+        super().rtt_start(block_address)
+
+    def rtt_stop(self):
+        self._check()
+        super().rtt_stop()
+
+    def rtt_read(self, index, num_bytes):
+        self._check()
+        return []
+
+    @property
+    def hardware_status(self):
+        self._check()
+        return FakeHardwareStatus(self.vtarget)
+
+
+def wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def conn_statuses(events):
+    return [e.data.get('status') for e in events if e.type == EventType.CONN]
+
+
+def test_auto_reconnect_recovers_after_the_probe_is_unplugged():
+    # Pulling the USB cable and putting it back must not leave the console
+    # dead: the old watchdog skipped every retry once the probe could not
+    # report the target voltage, and a reopen on the still "open" handle was a
+    # no-op that kept the dead session.
+    jlink = PluggableJLink()
+    jlink.open(1234)
+    conn = PyLinkRTTConnector(jlink, auto_reconnect=True, reconnect_interval=0.1,
+                              power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.open()
+    assert wait_for(lambda: conn._seen_target_power)
+
+    jlink.unplug()
+    assert wait_for(lambda: 'disconnected' in conn_statuses(events))
+    time.sleep(0.3)
+    jlink.plugged = True
+    recovered = wait_for(lambda: conn_statuses(events)[-1:] == ['connected'])
+    conn.close()
+
+    assert recovered, f'never came back after the probe was replugged: {conn_statuses(events)}'
+    assert jlink.sessions >= 2, 'the dead session was never replaced by a new one'
+
+
+def test_close_probe_releases_the_probe_after_a_reconnect():
+    # A reconnect used to open the probe again without closing it, so the
+    # handle counted two opens and jlink_close let go of only one: the probe
+    # stayed held, and the next jlink_open reused a stale session.
+    jlink = PluggableJLink()
+    jlink.open(1234)
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=5.0, power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    conn.request_reconnect()
+    assert wait_for(lambda: jlink.calls.count('rtt_start') >= 2)
+    time.sleep(0.1)
+    conn.suspend(status='released')
+    conn.close_probe()
+    held = jlink._open_refcount
+    conn.close()
+
+    assert held == 0, f'the probe is still held ({held} opens left)'
+
+
+def test_releasing_an_unplugged_probe_still_lets_go_of_it():
+    # rtt_stop fails on a probe that is gone; that must not keep jlink_close
+    # from closing the handle, or the dead session stays held.
+    jlink = PluggableJLink()
+    jlink.open(1234)
+    conn = PyLinkRTTConnector(jlink, device='NRF9151_XXCA', serial=1234, speed=2000)
+    events = []
+    conn.on(lambda e: events.append(e))
+    conn.open()
+
+    jlink.unplug()
+    conn.suspend(status='released')
+    conn.close_probe()
+
+    assert jlink._open_refcount == 0
+    assert conn_statuses(events)[-1] == 'released'
+    conn.close()
+
+
+def test_open_probe_replaces_a_dead_session():
+    jlink = PluggableJLink()
+    jlink.open(1234)
+    conn = PyLinkRTTConnector(jlink, device='NRF9151_XXCA', serial=1234, speed=2000)
+    jlink.unplug()
+    jlink.plugged = True
+
+    conn.open_probe()
+
+    assert jlink.live and jlink._open_refcount == 1
+    assert jlink.calls[-1] == ('connect', 'NRF9151_XXCA')
+
+
+def test_connector_opens_the_probe_itself(monkeypatch):
+    jlink = PluggableJLink()
+    monkeypatch.setattr(pylink_rtt_module.pylink, 'JLink', lambda: jlink)
+    conn = PyLinkRTTConnector(device='NRF9151_XXCA', serial=1234, speed=4000,
+                              reset_on_open=True)
+    conn.on(lambda e: None)
+    monkeypatch.setattr(pylink_rtt_module.time, 'sleep', lambda s: None)
+
+    conn.open()
+    calls = list(jlink.calls)
+    stop_read_thread(conn)
+
+    assert calls.index(('open', 1234)) < calls.index(('set_speed', 4000)) \
+        < calls.index(('connect', 'NRF9151_XXCA')) < calls.index(('reset', False)) \
+        < calls.index('rtt_start')
+
+
+def test_missing_probe_at_startup_fails_without_auto_reconnect(monkeypatch):
+    jlink = PluggableJLink()
+    jlink.plugged = False
+    monkeypatch.setattr(pylink_rtt_module.pylink, 'JLink', lambda: jlink)
+    conn = PyLinkRTTConnector(device='NRF9151_XXCA', serial=1234)
+    conn.on(lambda e: None)
+
+    # ProbeError, not just any Exception: it is what the CLI turns into an
+    # error message rather than a traceback.
+    with pytest.raises(ProbeError, match='J-Link: No emulator with serial number 1234'):
+        conn.open()
+
+
+def test_cli_without_the_probe_exits_with_an_error_not_a_traceback(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+    from rttt.cli import cli, CliContext
+
+    class FakeConsole:
+        def __init__(self, connector, history_file=None, max_lines=None):
+            self.connector = connector
+
+        def run(self):
+            # The real console opens the connector inside the TUI's pre_run.
+            self.connector.open()
+
+    jlink = PluggableJLink()
+    jlink.plugged = False
+    monkeypatch.setattr(pylink_rtt_module.pylink, 'JLink', lambda: jlink)
+    monkeypatch.setattr('rttt.cli.Console', FakeConsole)
+
+    result = CliRunner().invoke(
+        cli,
+        ['--serial', '1234', '--device', 'NRF9151_XXCA', '--no-substitutions',
+         '--console-file', str(tmp_path / 'c.log')],
+        obj=CliContext(config={}, sources=[]),
+    )
+    assert result.exit_code == 1
+    assert 'Error: J-Link: No emulator with serial number 1234' in result.output
+    assert not isinstance(result.exception, ProbeError), 'escaped as a traceback'
+
+
+def test_a_failed_target_connect_does_not_reopen_the_probe_every_retry(monkeypatch):
+    # The probe opened fine but the target was not there: later retries must
+    # only connect again, as a new session resets an nRF91 once it answers.
+    jlink = PluggableJLink()
+    monkeypatch.setattr(pylink_rtt_module.pylink, 'JLink', lambda: jlink)
+    monkeypatch.setattr(pylink_rtt_module.time, 'sleep', lambda s: None)
+    real_connect = jlink.connect
+    jlink.connect = lambda device: (_ for _ in ()).throw(
+        pylink_rtt_module.pylink.errors.JLinkException('Target system has no power'))
+    conn = PyLinkRTTConnector(device='NRF9151_XXCA', serial=1234)
+
+    with pytest.raises(ProbeError):
+        conn._prepare_probe()
+    jlink.connect = real_connect
+    conn._prepare_probe()
+
+    assert jlink.sessions == 1, 'the probe was reopened for a missing target'
+    assert conn._probe_ready
+
+
+def test_missing_probe_at_startup_waits_with_auto_reconnect(monkeypatch):
+    jlink = PluggableJLink()
+    jlink.plugged = False
+    monkeypatch.setattr(pylink_rtt_module.pylink, 'JLink', lambda: jlink)
+    conn = PyLinkRTTConnector(device='NRF9151_XXCA', serial=1234, auto_reconnect=True,
+                              reconnect_interval=0.1, power_check_interval=0.0)
+    events = []
+    conn.on(lambda e: events.append(e))
+
+    conn.open()
+    assert conn_statuses(events) == ['disconnected']
+    jlink.plugged = True
+    attached = wait_for(lambda: conn_statuses(events)[-1:] == ['connected'])
+    conn.close()
+
+    assert attached, conn_statuses(events)
+
+
+def test_reconnect_on_a_live_probe_does_not_reboot_the_target():
+    # A fresh open() and connect() resets an nRF91, so reopening the probe on
+    # every F4 or MCP reconnect would reboot the firmware each time. Only a
+    # probe that is gone gets reopened.
+    jlink = PluggableJLink()
+    jlink.open(1234)
+    jlink.connect('NRF9151_XXCA')
+    conn = PyLinkRTTConnector(jlink, reconnect_interval=5.0, power_check_interval=0.0,
+                              device='NRF9151_XXCA', serial=1234, speed=2000)
+    conn.on(lambda e: None)
+    conn.open()
+
+    conn.request_reconnect()
+    assert wait_for(lambda: jlink.calls.count('rtt_start') >= 2)
+    time.sleep(0.1)
+    conn.close()
+
+    assert jlink.calls.count(('connect', 'NRF9151_XXCA')) >= 2, 'the target was not reconnected'
+    assert jlink.sessions == 1, 'the probe was reopened although it was fine'
+    assert jlink.target_resets == 1, 'the reconnect rebooted the firmware'

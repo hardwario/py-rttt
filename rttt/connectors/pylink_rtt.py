@@ -11,14 +11,29 @@ from rttt.event import Event, EventType, conn_event
 CONN_SOURCE = 'rtt'
 
 
+class ProbeError(Exception):
+    """The J-Link probe or the target behind it cannot be reached."""
+
+
 class PyLinkRTTConnector(Connector):
 
-    def __init__(self, jlink: pylink.JLink, terminal_buffer=0, logger_buffer=1, latency=50, block_address=None,
+    def __init__(self, jlink: pylink.JLink = None, terminal_buffer=0, logger_buffer=1, latency=50, block_address=None,
                  flash_cmd=None, device=None, serial=None, speed=None, write_timeout=2.0,
                  power_check_interval=1.0, min_target_voltage=1000,
-                 auto_reconnect=False, reconnect_interval=3.0) -> None:
+                 auto_reconnect=False, reconnect_interval=3.0, reset_on_open=False) -> None:
+        """
+        Args:
+            jlink: an already opened and connected probe. Without one the
+                connector opens the probe itself in open(), from serial,
+                device and speed.
+            reset_on_open: reset the target once the probe connects in open(),
+                before attaching RTT. Only applies when no jlink is given.
+        """
         super().__init__()
-        self.jlink = jlink
+        # Opened in open() unless the caller hands over a probe it opened.
+        self._open_probe_on_open = jlink is None
+        self.jlink = jlink if jlink is not None else pylink.JLink()
+        self.reset_on_open = reset_on_open
         self.write_timeout = write_timeout
         self.power_check_interval = power_check_interval
         self.min_target_voltage = min_target_voltage
@@ -29,6 +44,11 @@ class PyLinkRTTConnector(Connector):
         self._watchdog = None
         self._watchdog_stop = threading.Event()
         self._reconnect_now = threading.Event()
+        self._last_reconnect_error = None
+        # False until open() got the probe ready (opened, logged, reset when
+        # asked). With auto_reconnect a probe missing at startup is finished
+        # by the watchdog once it appears.
+        self._probe_ready = not self._open_probe_on_open
         self.block_address = block_address
         self.rtt_read_delay = latency / 1000.0
         self.is_running = False
@@ -75,7 +95,12 @@ class PyLinkRTTConnector(Connector):
                 'disconnected', which is reserved for a link that failed.
         """
         self._suspended = True
-        self.stop(report=False)
+        try:
+            self.stop(report=False)
+        except Exception as e:
+            # A probe that is gone cannot stop RTT, but the session is down
+            # all the same -- and jlink_close still has to let go of it.
+            logger.warning(f'Stopping RTT: {e}')
         self._emit_conn(False, status=status)
 
     def resume(self):
@@ -126,7 +151,11 @@ class PyLinkRTTConnector(Connector):
                         if self.jlink.hardware_status.VTarget < self.min_target_voltage:
                             continue
                     except Exception:
-                        continue
+                        # The probe itself is gone (USB unplugged, re-enumerated)
+                        # rather than the target unpowered. Skipping here would
+                        # wait forever: only reopening the probe gets the voltage
+                        # readable again, so go on and reopen it.
+                        pass
 
             if not self._op_lock.acquire(blocking=False):
                 continue
@@ -143,19 +172,28 @@ class PyLinkRTTConnector(Connector):
                     # error'. Re-establishing it first is what makes the retry
                     # able to succeed. Needs the device, so a connector built
                     # without one can only try the plain attach.
-                    if self.device:
+                    if not self._probe_ready:
+                        self._prepare_probe()
+                    elif self.device:
                         # Failing here means there is nothing to attach to --
-                        # an unpowered target, or the probe held elsewhere. The
-                        # control block search would spend its full 15s timeout
-                        # proving that, holding _op_lock against an explicit
-                        # request all the while, so report and wait instead.
-                        self._reopen_jlink()
+                        # an unpowered target, an unplugged probe, or the probe
+                        # held elsewhere. The control block search would spend
+                        # its full 15s timeout proving that, holding _op_lock
+                        # against an explicit request all the while, so report
+                        # and wait instead.
+                        self.reconnect_probe()
                     self.start()
                 except Exception as e:
                     # start() reports nothing on failure, so keep the console's
-                    # warning accurate and try again on the next tick.
-                    logger.warning(f'Reconnect: attach failed: {e}')
+                    # warning accurate and try again on the next tick. A probe
+                    # left unplugged fails the same way every few seconds, so
+                    # only a new reason is worth a warning.
+                    log = logger.debug if str(e) == self._last_reconnect_error else logger.warning
+                    self._last_reconnect_error = str(e)
+                    log(f'Reconnect: attach failed: {e}')
                     self._emit_conn(False, f'Reconnecting failed: {e}')
+                else:
+                    self._last_reconnect_error = None
             finally:
                 self._op_lock.release()
 
@@ -262,7 +300,7 @@ class PyLinkRTTConnector(Connector):
             try:
                 self.jlink.rtt_start(self.block_address)
             except pylink.errors.JLinkException as e:
-                raise Exception(f'J-Link: {e}') from e
+                raise ProbeError(f'J-Link: {e}') from e
 
             num_up = None
             while time.monotonic() < deadline:
@@ -273,7 +311,7 @@ class PyLinkRTTConnector(Connector):
                 except pylink.errors.JLinkRTTException:
                     time.sleep(0.1)
                 except pylink.errors.JLinkException as e:
-                    raise Exception(f'J-Link: {e}') from e
+                    raise ProbeError(f'J-Link: {e}') from e
 
             resolved = num_up is not None and self._resolve_buffer_names(num_up)
 
@@ -394,6 +432,8 @@ class PyLinkRTTConnector(Connector):
         self._watchdog.start()
 
         try:
+            if not self._probe_ready:
+                self._prepare_probe()
             self.start()
         except Exception as e:
             if not self.auto_reconnect:
@@ -415,7 +455,12 @@ class PyLinkRTTConnector(Connector):
         if self._watchdog:
             self._watchdog.join(timeout=self.reconnect_interval + 1.0)
             self._watchdog = None
-        self.stop()
+        try:
+            self.stop()
+        except Exception as e:
+            # An unplugged probe cannot stop RTT, and quitting must still work.
+            logger.warning(f'Closing RTT: {e}')
+            self._emit_conn(False, str(e))
         self._emit(Event(EventType.CLOSE, ''))
         logger.info('RTT closed')
 
@@ -634,7 +679,7 @@ class PyLinkRTTConnector(Connector):
             raise Exception(f'Unknown placeholder in flash command: {e}') from e
 
         logger.info(f'Flash: running external command: {cmd}')
-        self.jlink.close()
+        self.close_probe()
         try:
             proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True)
@@ -654,27 +699,122 @@ class PyLinkRTTConnector(Connector):
                 raise Exception(f'Flash command failed with exit code {ret}')
             logger.info('Flash: external command complete')
         finally:
-            self._reopen_jlink()
+            self.open_probe()
 
-    def _reopen_jlink(self):
-        """Reopen the J-Link connection after an external tool used the probe."""
-        self.jlink.open(serial_no=self.serial)
+    def _prepare_probe(self):
+        """Open the probe for the first time, as the CLI asked for it."""
+        if self.jlink.opened():
+            # Opened on an earlier try that failed to reach the target. That
+            # probe is fine, so reopening it every tick would only reset the
+            # target once it is there.
+            self.reconnect_probe()
+        else:
+            self.open_probe()
+        self._log_probe_info()
+        if self.reset_on_open:
+            try:
+                # halt=False leaves the firmware running; there is no go() in
+                # pylink to follow a halting reset with.
+                self.jlink.reset(halt=False)
+            except pylink.errors.JLinkException as e:
+                raise ProbeError(f'J-Link: {e}') from e
+            time.sleep(1)
+        self._probe_ready = True
+
+    def close_probe(self):
+        """Let go of the probe, so another process can have it.
+
+        pylink counts open() calls and lets go of the probe only on the last
+        close(). The count is private, but it is the only way to know a
+        handle is really closed: one left open makes the next open() a no-op
+        that keeps the old session -- dead, once the USB cable was pulled.
+        """
+        for _ in range(max(getattr(self.jlink, '_open_refcount', 1), 1)):
+            try:
+                self.jlink.close()
+            except Exception as e:
+                logger.warning(f'J-Link: close failed: {e}')
+
+    def open_probe(self):
+        """Open the probe and connect to the target, replacing any old session.
+
+        The first connect of a new session resets an nRF91, so the firmware
+        reboots. Use reconnect_probe() to get a stale session working again.
+        Raises when the probe or the target cannot be reached.
+        """
+        self.close_probe()
         try:
-            self.jlink.disable_dialog_boxes()
-        except Exception:
-            pass
-        self.jlink.set_speed(self.speed or 2000)
-        self.jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+            self.jlink.open(serial_no=self.serial)
+        except pylink.errors.JLinkException as e:
+            raise ProbeError(f'J-Link: {e}') from e
+        self._connect_target()
+
+    def reconnect_probe(self):
+        """Re-establish the connection to the target after it dropped.
+
+        Connecting again over a probe that still answers keeps the firmware
+        running. Only a probe that is gone -- released, USB unplugged or
+        re-enumerated -- is opened anew, since its session cannot be revived.
+        Opening anew resets an nRF91, so one failed status read is not enough
+        to decide that: it is asked twice.
+        """
+        if self._probe_answers():
+            self._connect_target()
+            return
+        logger.info('J-Link: probe not answering, reopening it')
+        self.open_probe()
+
+    def _probe_answers(self):
+        if not self.jlink.opened():
+            return False
+        for attempt in range(2):
+            try:
+                self.jlink.hardware_status
+                return True
+            except Exception as e:
+                logger.debug(f'J-Link: hardware status failed: {e}')
+                if attempt == 0:
+                    time.sleep(0.2)
+        return False
+
+    def _connect_target(self):
+        try:
+            # Suppress DLL GUI dialogs (flash progress window, firmware update
+            # prompts) -- they have no place in a TUI/headless session.
+            try:
+                self.jlink.disable_dialog_boxes()
+            except Exception:
+                pass
+            self.jlink.set_speed(self.speed or 2000)
+            self.jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        except pylink.errors.JLinkException as e:
+            raise ProbeError(f'J-Link: {e}') from e
         for attempt in range(3):
             try:
                 self.jlink.connect(self.device)
                 return
             except pylink.errors.JLinkException as e:
                 if attempt < 2:
-                    logger.warning(f'J-Link: reconnect attempt {attempt + 1} failed: {e}, retrying...')
+                    logger.warning(f'J-Link: connect attempt {attempt + 1} failed: {e}, retrying...')
                     time.sleep(0.5)
                 else:
-                    raise Exception(f'J-Link reconnect failed: {e}') from e
+                    raise ProbeError(f'J-Link: {e}') from e
+
+    def _log_probe_info(self):
+        jlink = self.jlink
+        for label, getter in (
+            ('dll version', lambda: jlink.version),
+            ('dll compile_date', lambda: jlink.compile_date),
+            ('dll path', lambda: jlink._library._path),
+            ('serial_number', lambda: jlink.serial_number),
+            ('firmware_version', lambda: jlink.firmware_version),
+            ('firmware_outdated', lambda: jlink.firmware_outdated()),
+            ('firmware_newer', lambda: jlink.firmware_newer()),
+        ):
+            try:
+                logger.info(f'J-Link {label}: {getter()}')
+            except Exception:
+                pass
 
     def _read_task(self):
         while self.is_running:
@@ -694,7 +834,7 @@ class PyLinkRTTConnector(Connector):
                     try:
                         data = self.jlink.rtt_read(idx, num_bytes)
                     except pylink.errors.JLinkException as e:
-                        raise Exception(f'J-Link: {e}') from e
+                        raise ProbeError(f'J-Link: {e}') from e
                     if data:
                         got_data = True
                         lines = bytes(data).decode('utf-8', errors="backslashreplace")

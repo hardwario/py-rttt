@@ -460,13 +460,6 @@ def test_status_tracks_sources_independently():
 class FakeRTTConnector(FakeConnector):
     """A connector with the RTT session surface the start/stop tools drive."""
 
-    class _JLink:
-        def __init__(self, owner):
-            self._owner = owner
-
-        def close(self):
-            self._owner.calls.append('jlink_close')
-
     def __init__(self, device='NRF9151_XXCA'):
         super().__init__()
         self.calls = []
@@ -474,7 +467,6 @@ class FakeRTTConnector(FakeConnector):
         self.device = device
         self.serial = 1234
         self.speed = 2000
-        self.jlink = self._JLink(self)
 
     def stop(self, report=True):
         self.calls.append(('stop', report))
@@ -491,8 +483,14 @@ class FakeRTTConnector(FakeConnector):
         self.calls.append('start')
         self.is_running = True
 
-    def _reopen_jlink(self):
+    def close_probe(self):
+        self.calls.append('jlink_close')
+
+    def open_probe(self):
         self.calls.append('reopen')
+
+    def reconnect_probe(self):
+        self.calls.append('reconnect_probe')
 
 
 def make_rtt_middleware(**kwargs):
@@ -541,7 +539,7 @@ def test_start_resumes_reading():
         assert conn.is_running is True
         assert 'start' in conn.calls
         # Plain start does not reopen: that is reconnect's and jlink_open's job.
-        assert 'reopen' not in conn.calls
+        assert 'reopen' not in conn.calls and 'reconnect_probe' not in conn.calls
 
     asyncio.run(run())
 
@@ -585,8 +583,40 @@ def test_jlink_open_takes_the_probe_back_and_reads_again():
         result = tool_result(await m._mcp.call_tool('jlink_open', {}))
         assert result['status'] == 'ok'
         assert result['reading'] is True
-        # Reopening has to precede the attach, or it rescues nothing.
-        assert conn.calls.index('reopen') < conn.calls.index('start')
+        # Getting the probe back has to precede the attach, or it rescues
+        # nothing. reconnect_probe() reopens a released probe, but keeps one
+        # that is still held, so the firmware is not reset for nothing.
+        assert conn.calls.index('reconnect_probe') < conn.calls.index('start')
+        assert 'reopen' not in conn.calls
+
+    asyncio.run(run())
+
+
+def test_jlink_open_while_reading_starts_a_new_session():
+    # Without jlink_close first the probe may be reopened under the running
+    # session; the new one needs its own start, so it must not be skipped.
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        assert conn.is_running
+        conn.calls.clear()
+        result = tool_result(await m._mcp.call_tool('jlink_open', {}))
+        assert result['reading'] is True
+        stop_at = conn.calls.index(('stop', False))
+        assert stop_at < conn.calls.index('reconnect_probe') < conn.calls.index('start')
+
+    asyncio.run(run())
+
+
+def test_reconnect_reconnects_the_probe_before_attaching():
+    m, conn = make_rtt_middleware()
+
+    async def run():
+        conn.calls.clear()
+        result = tool_result(await m._mcp.call_tool('reconnect', {}))
+        assert result['status'] == 'ok'
+        assert conn.calls.index('reconnect_probe') < conn.calls.index('start')
+        assert 'reopen' not in conn.calls, 'a full reopen would reset an nRF91'
 
     asyncio.run(run())
 
