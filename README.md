@@ -495,9 +495,13 @@ curl -o slot0.bin 'http://<host>:8090/download?filename=slot0.bin'
 MCP clients can read the resource link instead of using HTTP; Claude Code
 saves the bytes to a local file and hands the AI only the path.
 
-`/download` serves only files from that dump directory. An absolute `to_file`
-path writes anywhere on the `rttt` machine instead, without a download link.
-With `--mcp-token` set, add the same `Authorization` header as for uploads.
+`/download` serves only files from that dump directory, and `to_file` takes a
+file name only, never a path: device output reaches the AI, so a dump must not
+be able to land in, say, `~/.bashrc`. The directory is deleted when `rttt`
+exits, so copy a dump you want to keep. For the same reason `from_file` of
+`write_memory` and `write_flash` reads only uploads and dumps, not arbitrary
+files. With `--mcp-token` set, add the same `Authorization` header as for
+uploads.
 
 > **Note:** without `--mcp-token` the MCP server and the upload and download
 > endpoints have no authentication. The default bind is `127.0.0.1`; set a token before

@@ -749,6 +749,19 @@ class FakeMemConnector(FakeConnector):
             off = addr - self.base
             return list(self.image[off:off + num_units])
 
+        def memory_write(self, addr, units, nbits=8):
+            self.written = (addr, bytes(units))
+            return len(units)
+
+        def flash_write(self, addr, data, nbits=8):
+            self.written = (addr, bytes(data))
+
+        def reset(self, ms=0, halt=False):
+            pass
+
+        def exec_command(self, cmd):
+            pass
+
     def __init__(self, base=0x10000, image=bytes(range(256)) * 16):
         super().__init__()
         self.jlink = self._JLink(base, image)
@@ -758,6 +771,7 @@ def make_mem_middleware(tmp_path):
     conn = FakeMemConnector()
     m = MCPMiddleware(conn, listen='127.0.0.1:0')
     m._dump_dir = str(tmp_path / 'dumps')
+    m._upload_dir = str(tmp_path / 'uploads')
     return m, conn
 
 
@@ -796,19 +810,111 @@ def test_read_memory_dump_resource_returns_the_bytes(tmp_path):
     assert contents[0].content == conn.jlink.image[:32]
 
 
-def test_read_memory_dump_to_absolute_path_has_no_link(tmp_path):
+def test_read_memory_refuses_to_dump_to_a_path(tmp_path):
+    # Device output reaches the agent, so text the firmware logs could talk
+    # it into dumping bytes the firmware chose over ~/.bashrc.
     m, _ = make_mem_middleware(tmp_path)
-    target = tmp_path / 'elsewhere.bin'
+    target = tmp_path / 'bashrc'
+    target.write_text('original')
+
+    result = tool_result(asyncio.run(m._mcp.call_tool(
+        'read_memory', {'address': '0x10000', 'length': 16, 'to_file': str(target)})))
+
+    assert result['status'] == 'error'
+    assert 'plain file name' in result['error']
+    assert target.read_text() == 'original'
+
+
+def test_write_memory_reads_an_upload_or_a_dump(tmp_path):
+    from rttt.connectors.mcp_server import _private_dir
+    m, conn = make_mem_middleware(tmp_path)
+    upload = os.path.join(_private_dir(m._upload_dir), 'blob.bin')
+    with open(upload, 'wb') as f:
+        f.write(b'\x01\x02\x03\x04')
 
     async def run():
-        return await m._mcp.call_tool(
-            'read_memory', {'address': '0x10000', 'length': 16, 'to_file': str(target)})
+        # By the path /upload returned, and by name.
+        for ref in (upload, 'blob.bin'):
+            result = tool_result(await m._mcp.call_tool(
+                'write_memory', {'address': '0x20000000', 'from_file': ref}))
+            assert result['status'] == 'ok', ref
+            assert conn.jlink.written == (0x20000000, b'\x01\x02\x03\x04')
+        await m._mcp.call_tool('read_memory', {'address': '0x10000', 'length': 8, 'to_file': 'd.bin'})
+        result = tool_result(await m._mcp.call_tool(
+            'write_memory', {'address': '0x20000000', 'from_file': 'd.bin'}))
+        assert result['status'] == 'ok'
+        assert conn.jlink.written == (0x20000000, conn.jlink.image[:8])
+        result = tool_result(await m._mcp.call_tool(
+            'write_flash', {'address': '0x80000', 'from_file': upload}))
+        assert result['status'] == 'ok'
+        assert conn.jlink.written == (0x80000, b'\x01\x02\x03\x04')
 
-    result = asyncio.run(run())
-    info = json.loads(result.content[0].text)
-    assert info['file'] == str(target)
-    assert 'url' not in info
-    assert len(result.content) == 1
+    conn.is_running = False
+    asyncio.run(run())
+
+
+def test_from_file_refuses_a_name_both_uploaded_and_dumped(tmp_path):
+    # Either could be meant; programming the wrong one would go unnoticed.
+    from rttt.connectors.mcp_server import _private_dir
+    m, conn = make_mem_middleware(tmp_path)
+    upload = os.path.join(_private_dir(m._upload_dir), 'x.bin')
+    with open(upload, 'wb') as f:
+        f.write(b'\xaa\xbb\xcc\xdd')
+
+    async def run():
+        dump = tool_result(await m._mcp.call_tool(
+            'read_memory', {'address': '0x10000', 'length': 4, 'to_file': 'x.bin'}))
+        refused = tool_result(await m._mcp.call_tool(
+            'write_memory', {'address': '0x20000000', 'from_file': 'x.bin'}))
+        assert refused['status'] == 'error'
+        by_path = tool_result(await m._mcp.call_tool(
+            'write_memory', {'address': '0x20000000', 'from_file': dump['file']}))
+        assert by_path['status'] == 'ok'
+        assert conn.jlink.written == (0x20000000, conn.jlink.image[:4])
+
+    asyncio.run(run())
+
+
+def test_from_file_refuses_an_upload_dir_open_to_others(tmp_path):
+    m, conn = make_mem_middleware(tmp_path)
+    os.makedirs(m._upload_dir)
+    os.chmod(m._upload_dir, 0o777)
+    with open(os.path.join(m._upload_dir, 'planted.bin'), 'wb') as f:
+        f.write(b'planted!')
+
+    for ref in ('planted.bin', os.path.join(m._upload_dir, 'planted.bin')):
+        result = tool_result(asyncio.run(m._mcp.call_tool(
+            'write_memory', {'address': '0x20000000', 'from_file': ref})))
+        assert result['status'] == 'error', ref
+    assert not hasattr(conn.jlink, 'written')
+
+
+def test_download_of_a_directory_is_a_404(tmp_path):
+    from rttt.connectors.mcp_server import _private_dir
+    m, _ = make_mem_middleware(tmp_path)
+    os.makedirs(os.path.join(_private_dir(m._dump_dir), 'sub'))
+
+    assert run_http_get(m._build_app(), '/download', b'filename=sub')[0] == 404
+
+
+def test_write_memory_refuses_any_other_file(tmp_path):
+    # An SSH key read into the target's RAM is the firmware's to send away.
+    from rttt.connectors.mcp_server import _private_dir
+    m, conn = make_mem_middleware(tmp_path)
+    secret = tmp_path / 'id_ed25519'
+    secret.write_bytes(b'secret!!')
+    os.symlink(secret, os.path.join(_private_dir(m._upload_dir), 'link.bin'))
+
+    async def run():
+        for ref in (str(secret), 'link.bin', os.path.join(m._upload_dir, '..', 'id_ed25519')):
+            for tool in ('write_memory', 'write_flash'):
+                result = tool_result(await m._mcp.call_tool(
+                    tool, {'address': '0x20000000', 'from_file': ref}))
+                assert result['status'] == 'error', (tool, ref)
+                assert 'uploaded to this server' in result['error']
+
+    asyncio.run(run())
+    assert not hasattr(conn.jlink, 'written')
 
 
 def test_read_memory_dump_rejects_a_relative_path_with_directories(tmp_path):
@@ -875,7 +981,7 @@ def test_tool_annotations_tell_reads_from_writes():
         assert tools[name].destructive_hint is True, name
     for name in ('stop', 'start', 'jlink_close', 'jlink_open', 'halt', 'go', 'reconnect'):
         assert tools[name].destructive_hint is False, name
-    # An absolute to_file can overwrite a file on the server.
+    # It writes a dump file, if only into its own dump directory.
     assert tools['read_memory'].read_only_hint is False
     # Every tool talks to the one probe, nothing beyond it.
     assert all(a is not None and a.open_world_hint is False for a in tools.values())
@@ -1094,20 +1200,14 @@ def test_private_dir_tightens_a_directory_left_open(tmp_path):
 
 def test_close_deletes_the_dumps(tmp_path):
     m, _ = make_mem_middleware(tmp_path)
-    kept = tmp_path / 'kept.bin'
 
-    async def run():
-        await m._mcp.call_tool('read_memory', {'address': '0x10000', 'length': 16, 'to_file': 'a.bin'})
-        await m._mcp.call_tool('read_memory', {'address': '0x10000', 'length': 16, 'to_file': str(kept)})
-
-    asyncio.run(run())
+    asyncio.run(m._mcp.call_tool('read_memory', {'address': '0x10000', 'length': 16, 'to_file': 'a.bin'}))
     assert os.listdir(m._dump_dir)
 
     m.open()
     m.close()
 
     assert not os.path.exists(m._dump_dir)
-    assert kept.exists(), 'a dump to an absolute path belongs to the caller'
 
 
 def test_close_leaves_a_dump_dir_that_is_not_ours(tmp_path):

@@ -113,6 +113,16 @@ def _remove_private_dir(path: str) -> None:
         logger.warning(f'Could not remove {path}: {e}')
 
 
+_FROM_FILE_ERROR = ("from_file must name a file uploaded to this server (POST /upload) or a "
+                    "dump from read_memory to_file, by name or by the path the server returned "
+                    "(the path, when an upload and a dump share the name)")
+
+
+def _is_plain_name(name: str) -> bool:
+    """True for a bare file name: no directory part, nothing special."""
+    return bool(name) and os.path.basename(name) == name and name not in ('.', '..') and '\0' not in name
+
+
 def _create_private_file(path: str):
     """Open `path` for writing without following a symlink planted there."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
@@ -127,9 +137,11 @@ def _read_private_file(path: str):
         fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     except OSError:
         return None
+    # Checked before fdopen, which refuses a directory and would leak fd.
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
     with os.fdopen(fd, 'rb') as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-            return None
         return f.read()
 
 
@@ -217,7 +229,7 @@ _CONTROL = mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=Fals
 # Rewrites flash or memory, or reboots the firmware.
 _DESTRUCTIVE = mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=True,
                                          open_world_hint=False)
-# Reads the target, but an absolute to_file can overwrite a file on the server.
+# Reads the target, and may write a dump into the server's own dump directory.
 _DUMP = mcp_types.ToolAnnotations(read_only_hint=False, open_world_hint=False)
 # The device shell can do anything, so no claim either way.
 _TALK = mcp_types.ToolAnnotations(read_only_hint=False, open_world_hint=False)
@@ -398,9 +410,34 @@ class MCPMiddleware(AsyncMiddleware):
     def _dump_file(self, name: str):
         """Path of dump `name` in the dump directory, or None when `name` is
         not a plain file name (a dump is only ever served from there)."""
-        if not name or os.path.basename(name) != name or name in ('.', '..') or '\0' in name:
+        if not _is_plain_name(name):
             return None
         return os.path.join(self._dump_dir, name)
+
+    def _read_server_file(self, ref: str):
+        """Bytes of a file that came in through this server -- an upload or
+        a dump -- named plainly or by the path the server returned, or None.
+
+        Nothing else on the disk is readable this way. A tool call can be
+        talked into anything by text the device logs, and reading, say, an
+        SSH key into the target's RAM would hand it to the firmware.
+        """
+        found = []
+        for directory in (self._upload_dir, self._dump_dir):
+            if _is_plain_name(ref):
+                name = ref
+            elif os.path.normpath(os.path.dirname(ref)) == os.path.normpath(directory):
+                name = os.path.basename(ref)
+            else:
+                continue
+            if not _is_plain_name(name) or not _is_private_dir(directory):
+                continue
+            data = _read_private_file(os.path.join(directory, name))
+            if data is not None:
+                found.append(data)
+        # A bare name that is both an upload and a dump could be either;
+        # programming the wrong one would go unnoticed. The path tells.
+        return found[0] if len(found) == 1 else None
 
     def _read_dump(self, name: str):
         """Bytes of dump `name`, or None. Served only from a dump directory
@@ -1162,13 +1199,13 @@ class MCPMiddleware(AsyncMiddleware):
                 to_file: Optional file to dump the raw bytes to instead of
                     returning them inline (use for large blocks — the reply
                     then carries only the path, size, sha256 and a short
-                    preview, never the data). Either a plain file name, e.g.
-                    "slot0.bin", or an absolute path on the machine this
-                    server runs on. A plain name goes to the server's dump
-                    directory, and the reply adds a `rttt://dumps/<name>`
-                    resource link plus a `url`. That directory is deleted when
-                    rttt exits or restarts, so copy a dump you need, or pass
-                    an absolute path for a file to keep. When you are not on the
+                    preview, never the data). A plain file name, e.g.
+                    "slot0.bin": the dump goes to the server's dump
+                    directory, and the reply adds its `file` path, a
+                    `rttt://dumps/<name>` resource link and a `url`. Paths
+                    are refused, so a dump never lands anywhere else. The
+                    dump directory is deleted when rttt exits or restarts;
+                    copy a dump you want to keep. When you are not on the
                     server's machine, read the resource link (clients such as
                     Claude Code save the bytes to a local file rather than
                     into the conversation) or download the `url`:
@@ -1191,25 +1228,18 @@ class MCPMiddleware(AsyncMiddleware):
                 return b''.join(int(u).to_bytes(unit, 'little') for u in units)[:n]
 
             if to_file:
-                if os.path.isabs(to_file):
-                    path, name = to_file, None
-                else:
-                    path, name = middleware._dump_file(to_file), to_file
-                    if path is None:
-                        return {"status": "error",
-                                "error": "to_file must be a plain file name or an absolute path"}
+                path, name = middleware._dump_file(to_file), to_file
+                if path is None:
+                    return {"status": "error",
+                            "error": "to_file must be a plain file name, e.g. \"slot0.bin\"; "
+                                     "the dump goes to the server's dump directory"}
 
                 def _do():
                     digest = hashlib.sha256()
                     total = 0
                     preview = b''
-                    if name is None:
-                        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-                        out = open(path, 'wb')
-                    else:
-                        _private_dir(middleware._dump_dir)
-                        out = _create_private_file(path)
-                    with out as f:
+                    _private_dir(middleware._dump_dir)
+                    with _create_private_file(path) as f:
                         while total < length:
                             chunk = _read_block(addr + total, min(65536, length - total))
                             f.write(chunk)
@@ -1226,7 +1256,7 @@ class MCPMiddleware(AsyncMiddleware):
                     }
 
                 result = await middleware._run_target_op(_do, timeout=30.0 + length / 50000)
-                if name is None or result["status"] != "ok":
+                if result["status"] != "ok":
                     return result
                 query = f'/download?filename={quote(name)}'
                 host = (_request_headers(ctx) or {}).get('host')
@@ -1263,18 +1293,19 @@ class MCPMiddleware(AsyncMiddleware):
                     build: `arm-none-eabi-nm -S zephyr.elf | grep <name>`.
                 data: Hex byte string, e.g. "deadbeef" (little-endian units).
                 width: Access width in bits: 8, 16 or 32.
-                from_file: Optional path to a file whose raw bytes are written
-                    instead of `data` (use for large blocks). The path is
-                    resolved on the machine this server runs on.
+                from_file: Optional file whose raw bytes are written instead
+                    of `data` (use for large blocks): one uploaded to this
+                    server (POST /upload) or a dump from `read_memory`
+                    `to_file`, by name or by the path the server returned.
+                    Other files are refused.
             """
             conn = middleware._leaf()
             try:
                 addr = int(address, 0)
                 if from_file:
-                    if not os.path.isfile(from_file):
-                        return {"status": "error", "error": f"File not found: {from_file}"}
-                    with open(from_file, 'rb') as f:
-                        raw = f.read()
+                    raw = middleware._read_server_file(from_file)
+                    if raw is None:
+                        return {"status": "error", "error": _FROM_FILE_ERROR}
                 else:
                     raw = bytes.fromhex(data.replace(' ', ''))
             except (ValueError, OSError) as e:
@@ -1302,19 +1333,20 @@ class MCPMiddleware(AsyncMiddleware):
             Args:
                 address: Flash address, e.g. "0x10000".
                 data: Hex byte string to program, e.g. "96f3b83d...".
-                from_file: Optional path to a file whose raw bytes are
-                    programmed instead of `data` (use for large blobs; for
-                    whole .hex/.elf images prefer the `flash` tool). The path
-                    is resolved on the machine this server runs on.
+                from_file: Optional file whose raw bytes are programmed
+                    instead of `data` (use for large blobs; for whole
+                    .hex/.elf images prefer the `flash` tool): one uploaded to
+                    this server (POST /upload) or a dump from `read_memory`
+                    `to_file`, by name or by the path the server returned.
+                    Other files are refused.
             """
             conn = middleware._leaf()
             try:
                 addr = int(address, 0)
                 if from_file:
-                    if not os.path.isfile(from_file):
-                        return {"status": "error", "error": f"File not found: {from_file}"}
-                    with open(from_file, 'rb') as f:
-                        raw = f.read()
+                    raw = middleware._read_server_file(from_file)
+                    if raw is None:
+                        return {"status": "error", "error": _FROM_FILE_ERROR}
                 else:
                     raw = bytes.fromhex(data.replace(' ', ''))
             except (ValueError, OSError) as e:
@@ -1430,9 +1462,9 @@ class MCPMiddleware(AsyncMiddleware):
                 "  When you are not on the server's machine, read the returned\n"
                 "  resource link (it saves to a local file) or curl the `url`, then\n"
                 "  inspect the file with local tools.\n"
-                "- Dumps saved by name are deleted when rttt exits or restarts.\n"
-                "  Copy what you need, or give `to_file` an absolute path to keep\n"
-                "  the file.\n"
+                "- Dumps are deleted when rttt exits or restarts; copy what you\n"
+                "  need. `to_file` takes a file name only, and `from_file` of\n"
+                "  `write_memory`/`write_flash` reads only uploads and dumps.\n"
                 "- `write_flash` programs internal flash bytes (device reboots).\n"
                 "\n"
                 "Troubleshooting:\n"
