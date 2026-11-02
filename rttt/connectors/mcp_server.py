@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import socket
 import stat
 import tempfile
@@ -99,6 +100,17 @@ def _is_private_dir(path: str) -> bool:
     if hasattr(os, 'getuid'):
         return st.st_uid == os.getuid() and not st.st_mode & 0o077
     return True
+
+
+def _remove_private_dir(path: str) -> None:
+    """Delete a directory _private_dir made, with all in it. One that is not
+    ours -- another user's, open to others, or a symlink -- is left alone."""
+    if not _is_private_dir(path):
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError as e:
+        logger.warning(f'Could not remove {path}: {e}')
 
 
 def _create_private_file(path: str):
@@ -320,6 +332,9 @@ class MCPMiddleware(AsyncMiddleware):
                     self._server_task.result(timeout=3)
                 except Exception:
                     pass
+        # Dumps saved by name are reachable only through this server, so they
+        # go with it; left behind, they would pile up in the temp dir.
+        _remove_private_dir(self._dump_dir)
         super().close()
 
     def _register_routes(self):
@@ -1151,7 +1166,9 @@ class MCPMiddleware(AsyncMiddleware):
                     "slot0.bin", or an absolute path on the machine this
                     server runs on. A plain name goes to the server's dump
                     directory, and the reply adds a `rttt://dumps/<name>`
-                    resource link plus a `url`. When you are not on the
+                    resource link plus a `url`. That directory is deleted when
+                    rttt exits or restarts, so copy a dump you need, or pass
+                    an absolute path for a file to keep. When you are not on the
                     server's machine, read the resource link (clients such as
                     Claude Code save the bytes to a local file rather than
                     into the conversation) or download the `url`:
@@ -1413,6 +1430,9 @@ class MCPMiddleware(AsyncMiddleware):
                 "  When you are not on the server's machine, read the returned\n"
                 "  resource link (it saves to a local file) or curl the `url`, then\n"
                 "  inspect the file with local tools.\n"
+                "- Dumps saved by name are deleted when rttt exits or restarts.\n"
+                "  Copy what you need, or give `to_file` an absolute path to keep\n"
+                "  the file.\n"
                 "- `write_flash` programs internal flash bytes (device reboots).\n"
                 "\n"
                 "Troubleshooting:\n"

@@ -1092,6 +1092,40 @@ def test_private_dir_tightens_a_directory_left_open(tmp_path):
     assert (d.stat().st_mode & 0o777) == 0o700
 
 
+def test_close_deletes_the_dumps(tmp_path):
+    m, _ = make_mem_middleware(tmp_path)
+    kept = tmp_path / 'kept.bin'
+
+    async def run():
+        await m._mcp.call_tool('read_memory', {'address': '0x10000', 'length': 16, 'to_file': 'a.bin'})
+        await m._mcp.call_tool('read_memory', {'address': '0x10000', 'length': 16, 'to_file': str(kept)})
+
+    asyncio.run(run())
+    assert os.listdir(m._dump_dir)
+
+    m.open()
+    m.close()
+
+    assert not os.path.exists(m._dump_dir)
+    assert kept.exists(), 'a dump to an absolute path belongs to the caller'
+
+
+def test_close_leaves_a_dump_dir_that_is_not_ours(tmp_path):
+    # rttt never vouched for a directory open to others, so it does not
+    # delete what is in it either.
+    m, _ = make_mem_middleware(tmp_path)
+    os.makedirs(m._dump_dir)
+    os.chmod(m._dump_dir, 0o777)
+    planted = os.path.join(m._dump_dir, 'planted.bin')
+    with open(planted, 'wb') as f:
+        f.write(b'planted')
+
+    m.open()
+    m.close()
+
+    assert os.path.exists(planted)
+
+
 def test_download_refuses_a_dump_dir_someone_else_could_write(tmp_path):
     # rttt never wrote here, so nothing vouched for the directory: one left
     # open to others is not served from.
