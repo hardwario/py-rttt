@@ -1137,7 +1137,9 @@ class MCPMiddleware(AsyncMiddleware):
             this also serves as flash read.
 
             Args:
-                address: Start address, e.g. "0x10000" or decimal.
+                address: Start address, e.g. "0x10000" or decimal. For a
+                    variable, take it from the firmware ELF of the running
+                    build: `arm-none-eabi-nm -S zephyr.elf | grep <name>`.
                 length: Number of bytes to read (max 65536 inline, 16 MiB
                     with `to_file`).
                 width: Access width in bits: 8, 16 or 32 (use 32 for
@@ -1239,7 +1241,9 @@ class MCPMiddleware(AsyncMiddleware):
             Does NOT program flash — use `write_flash` for that.
 
             Args:
-                address: Start address, e.g. "0x20000000" or decimal.
+                address: Start address, e.g. "0x20000000" or decimal. For a
+                    variable, take it from the firmware ELF of the running
+                    build: `arm-none-eabi-nm -S zephyr.elf | grep <name>`.
                 data: Hex byte string, e.g. "deadbeef" (little-endian units).
                 width: Access width in bits: 8, 16 or 32.
                 from_file: Optional path to a file whose raw bytes are written
@@ -1398,6 +1402,12 @@ class MCPMiddleware(AsyncMiddleware):
                 "  PC/LR/SP tell you where the firmware is stuck.\n"
                 "- `read_memory`/`write_memory` access RAM and peripherals live;\n"
                 "  flash is memory-mapped so `read_memory` also reads flash.\n"
+                "- Take the address of a variable or function from the firmware ELF of\n"
+                "  the build that runs on the device; this server does not read ELFs.\n"
+                "  Zephyr puts it in build/zephyr/zephyr.elf (with sysbuild\n"
+                "  build/<app>/zephyr/zephyr.elf). `arm-none-eabi-nm -S zephyr.elf |\n"
+                "  grep <name>` gives address and size (Zephyr SDK: arm-zephyr-eabi-nm);\n"
+                "  `ptype <name>` in a gdb for the target shows the layout of a struct.\n"
                 "- For more than a few hundred bytes pass `to_file` (e.g. \"slot0.bin\")\n"
                 "  to `read_memory`: the data goes to a file, not into the reply.\n"
                 "  When you are not on the server's machine, read the returned\n"
