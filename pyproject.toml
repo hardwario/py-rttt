@@ -1,6 +1,6 @@
 [project]
 name = "rttt"
-version = "1.11.0"
+version = "1.12.0"
 description = "HARDWARIO Real Time Transfer Terminal Console"
 authors = [
     { name = "Karel Blavka", email = "karel.blavka@hardwario.com" },
